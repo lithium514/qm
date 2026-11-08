@@ -79,6 +79,7 @@ import type { BudgetTracker } from "../ratelimit/budget.ts";
 import type { AdvisoryLock } from "../persistence/advisory-lock.ts";
 import type { AppPageViewLog } from "../deploy/page-views.ts";
 import type { SlackInstallationStore, SlackSocketAppIdReader } from "../surfaces/slack-installation.ts";
+import type { FeishuCardEndpoint } from "../feishu/http.ts";
 
 import type { SlackAccountLink, ComposioReturn } from "./routes/composio.ts";
 import { type ProviderKeys } from "../model/model-runtime.ts";
@@ -106,6 +107,7 @@ export interface ServerDeps {
   brokerSessions?: BrokerSessionStore;
   connectorTokens?: ConnectorTokenStore;
   managedSlack?: ManagedSlack;
+  feishuCard?: FeishuCardEndpoint;
   slackInstallation?: SlackInstallationStore;
   slackInstallationFetch?: typeof fetch;
   slackWebClient?: SlackWebClientFactory;
@@ -183,6 +185,8 @@ export interface ServerDeps {
   loopSourceTokens?: ConnectorTokenSource;
   inboxSourceRefresh?: InboxSourceRefresh;
   loopSlackClient?: (token: string) => SlackUserClient;
+  loopFeishuClient?: (token: string) => import("../loops/sources/adapter.ts").FeishuUserClient;
+  loopFeishuReader?: (token: string) => import("../feishu/read.ts").FeishuUserReader;
   sessionShares?: SessionShareStore;
   sessionShareBytes?: DurableByteStore;
   environments?: EnvironmentStore;

@@ -1,9 +1,10 @@
 import type { LoopItem } from "../types.ts";
 import { gmailAdapter } from "./gmail.ts";
+import { feishuAdapter } from "./feishu.ts";
 import { slackAdapter } from "./slack.ts";
 import type { LoopSourceAdapter } from "./adapter.ts";
 
-const SOURCE_ADAPTERS: readonly LoopSourceAdapter[] = [gmailAdapter, slackAdapter];
+const SOURCE_ADAPTERS: readonly LoopSourceAdapter[] = [gmailAdapter, slackAdapter, feishuAdapter];
 
 export const SOURCE_IDS: readonly string[] = SOURCE_ADAPTERS.map((adapter) => adapter.id);
 

@@ -18,17 +18,28 @@ export function createApprovalStore(
   deliveries: Pick<DeliveryStore, "enqueue">,
 ) {
   async function deliver(id: string, record: PendingApprovalRecord): Promise<void> {
-    if (record.request?.surface !== "slack") return;
-    const actorId = approvalDeliveryRecipient(record.request.actor);
+    const request = record.request;
+    if (!request) return;
+    const actorId = approvalDeliveryRecipient(request.actor);
     if (!actorId) return;
-    const threadTs = record.request.conversation?.kind === "dm" ? record.request.slackSource?.replyThreadTs : undefined;
+    if (request.surface === "feishu") {
+      if (!request.deliveryTarget) return;
+      await deliveries.enqueue({
+        destination: { type: "feishu", target: request.deliveryTarget, commandApprovalId: id },
+        text: `Approval needed: ${record.summary ?? record.command}`,
+        idempotencyKey: approvalDeliveryKey(id, record),
+      });
+      return;
+    }
+    if (request.surface !== "slack") return;
+    const threadTs = request.conversation?.kind === "dm" ? request.slackSource?.replyThreadTs : undefined;
     await deliveries.enqueue({
       destination: {
         ...principalDestination(actorId, actorId),
         commandApprovalId: id,
         ...(threadTs ? { threadTs } : {}),
-        ...(record.request.slackSource
-          ? { slackAccountId: record.request.slackSource.accountId, slackTeamId: record.request.slackSource.teamId }
+        ...(request.slackSource
+          ? { slackAccountId: request.slackSource.accountId, slackTeamId: request.slackSource.teamId }
           : {}),
       },
       text: `Approval needed: ${record.summary ?? record.command}`,

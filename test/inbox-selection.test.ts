@@ -68,11 +68,11 @@ test("default Loops are distinct, stable, and deliberate empty selections surviv
   const first = await w.call();
   assert.deepEqual(
     first.data.selected.map((loop: any) => loop.name),
-    ["Email", "Slack"],
+    ["Email", "Slack", "Feishu"],
   );
   assert.notEqual(first.data.selected[0].id, first.data.selected[1].id);
   await w.call();
-  assert.equal((await w.deps.store.list()).length, 2);
+  assert.equal((await w.deps.store.list()).length, 3);
   assert.equal((await w.call("PUT", { loopIds: [] })).status, 200);
   assert.deepEqual((await w.call()).data.selected, []);
 });
@@ -419,7 +419,7 @@ test("the inbox feed reconciles selected owner Gmail loops before counting summa
 
 test("email filters leave Slack unchanged while source counts include all open conversations", async () => {
   const w = world();
-  const [email, slack] = await ensureDefaultInboxLoops(w.deps.store, "alice");
+  const [email, slack, feishu] = await ensureDefaultInboxLoops(w.deps.store, "alice");
   for (const [key, payload, draft] of [
     ["question", {}, true],
     ["thanks", { probablyResolved: true }, true],
@@ -470,6 +470,7 @@ test("email filters leave Slack unchanged while source counts include all open c
   assert.deepEqual(sourceCounts(triaged), [
     [email!.id, 4],
     [slack!.id, 4],
+    [feishu!.id, 0],
   ]);
   for (const [filter, expected] of [
     ["triaged", ["question", "slack-bot", "slack-question", "slack-resolved"]],
@@ -511,6 +512,7 @@ test("email filters leave Slack unchanged while source counts include all open c
   assert.deepEqual(sourceCounts(afterDismiss), [
     [email!.id, 3],
     [slack!.id, 4],
+    [feishu!.id, 0],
   ]);
 });
 

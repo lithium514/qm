@@ -229,6 +229,7 @@ import { createTurnSandboxes } from "./orchestrator/sandboxes.ts";
 import type { EgressPolicy } from "../types.ts";
 import { isOpenScopeMember } from "../resolution/sharing-access.ts";
 import { createSurfaceToolDeps, type SpineState } from "../surfaces/surface-tools.ts";
+import { surfaceCapabilities } from "../surfaces/capabilities.ts";
 import { createAttachStaging } from "./orchestrator/attach-tool.ts";
 import { reconcileMessageRevisions, revisionAnchorAt } from "../slack/message-revisions.ts";
 import { type ProviderKeys } from "../model/model-runtime.ts";
@@ -534,12 +535,13 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     },
 
     async handleTurn(input: OrchestratorInput): Promise<TurnResult> {
+      const caps = surfaceCapabilities(input.surface);
       if (
         !externalSlackRequestAllowed(
           { ...input, surface: input.surface ?? "" },
           deps.externalSlackPolicies,
           Object.keys(deps.externalSlackPolicies ?? {}).length > 0 &&
-            (await deps.sessions.getByThread(input.conversation.threadRef))?.surface === "slack",
+            surfaceCapabilities((await deps.sessions.getByThread(input.conversation.threadRef))?.surface).externalSlack,
         )
       )
         return { status: "refused", reason: "Slack workspace access changed; start a fresh request in Slack." };
@@ -698,7 +700,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       if (conversation.kind !== "dm" && !deps.identity.audienceIsAllInternal(conversation.audience)) {
         const externalAllowed =
           external ||
-          (input.surface === "slack" &&
+          (caps.externalAudience &&
             (deps.config ? await deps.config.getExternalSlackParticipantsDurable(toScopeId("org", orgId())) : false));
         if (!externalAllowed) {
           return {
@@ -1050,12 +1052,13 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       });
       const { sharingSources, memoryScopeId, baseRecallScopes, memoryAccess } = context;
       resolution.grantedHandles = context.listFiles();
-      const isWeb = input.surface === "web";
-      const isSlack = input.surface === "slack";
-      const surfaceTool = input.surface ?? "slack";
+      const isWeb = caps.id === "web";
+      const isSlack = caps.promptSlack;
+      const surfaceTool = caps.toolName;
       const branding = await resolveBranding(deps.config, resolution.orgScopeId, deps.brandingDefault);
       const botName = branding.selfLabel ?? "QM";
       const orgName = branding.orgName ?? "this organization";
+      const surfaceLabel = isWeb ? `the ${botName} web app` : caps.label;
       const rawHandle = cleanBrandingLabel(input.gatewayContext?.botHandle?.replace(/^@/, ""), 40);
       const botHandle = rawHandle && rawHandle.toLowerCase() !== botName.toLowerCase() ? rawHandle : undefined;
       let modeName = "mode-fallback";
@@ -1068,7 +1071,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       const frameVars: PromptVars = {
         botName,
         surfaceTool,
-        surfaceLabel: isWeb ? `the ${botName} web app` : "Slack",
+        surfaceLabel,
         conversationType: { dm: "private 1:1", group: "group conversation", channel: "channel conversation" }[
           conversation.kind
         ],
@@ -1080,7 +1083,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         frameVars.userEmail = actor.id.includes("@") ? actor.id : undefined;
       }
       const surfaceName =
-        input.origin.kind === "automation" && input.origin.destination ? "slack" : (input.surface ?? "slack");
+        input.origin.kind === "automation" && input.origin.destination
+          ? (input.origin.destination.type ?? caps.id)
+          : caps.id;
       const sessionSyscalls =
         !external && deps.sessionSyscalls && (delegationEnabled || actorFeatures.has("persistent_subagents"))
           ? deps.sessionSyscalls
@@ -1955,7 +1960,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       if (!acquired.lease) return acquired.refusal;
       const lease = acquired.lease;
       if (!ambientTurn) assignSessionTitle();
-      const trackRevisions = input.surface === "slack" && Boolean(deps.surfaceCache);
+      const trackRevisions = caps.historyRevisions && Boolean(deps.surfaceCache);
       const revisionAnchor = trackRevisions ? await revisionAnchorAt(deps.sessions, session.id) : undefined;
       const catchUpMessageRevisions = async (): Promise<void> => {
         if (!trackRevisions || !deps.surfaceCache) return;
@@ -1992,6 +1997,35 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           context.memorySnapshot(),
         ]);
         let historyAppended = input.approval !== undefined;
+        let approvalAlreadyApplied = false;
+        if (input.approval) {
+          const unresolved = await pending.get(input.approval.requestId);
+          if (!unresolved) {
+            const resolved = (await deps.sessions.getEntries(session.id)).findLast(
+              (entry) =>
+                entry.type === "approval_resolved" &&
+                (entry.payload as { requestId?: string } | null)?.requestId === input.approval!.requestId &&
+                (entry.payload as { approved?: boolean } | null)?.approved === input.approval!.approved,
+            );
+            const payload = resolved?.payload as
+              { approved?: boolean; scope?: string; command?: string; approvalKey?: string } | undefined;
+            if (payload) {
+              if (!payload.approved) {
+                return {
+                  status: "refused",
+                  sessionId: session.id,
+                  reason: `approval denied for ${payload.command ?? "this command"}`,
+                  refusalKind: "approval_denied",
+                };
+              }
+              approvalAlreadyApplied = true;
+              const uses = payload.scope === "once" ? 1 : Infinity;
+              if (payload.approvalKey)
+                commandUses.set(payload.approvalKey, (commandUses.get(payload.approvalKey) ?? 0) + uses);
+              if (payload.command) commandUses.set(payload.command, (commandUses.get(payload.command) ?? 0) + uses);
+            }
+          }
+        }
         const captureDependencies = () => [
           ...memoryView.facts,
           ...(!memoryView.complete ||
@@ -2006,7 +2040,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         ];
         const historyWindow = () => deps.sessions.getContextWindow(session.id);
         const turnWindow = async () => (historyAppended ? historyWindow() : memoryWindow);
-        if (input.approval) {
+        if (input.approval && !approvalAlreadyApplied) {
           const p = await pending.get(input.approval.requestId);
           const decision = input.approval.approved ? "approve" : "deny";
           if (!p || p.sessionId !== session.id) {
@@ -2043,7 +2077,12 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             const decisionEntry = await withManagedRosterVersion(() =>
               deps.sessions.append(lease, {
                 type: "approval_resolved",
-                payload: { requestId: input.approval!.requestId, command: p.command, approved: false },
+                payload: {
+                  requestId: input.approval!.requestId,
+                  command: p.command,
+                  approved: false,
+                  ...(p.approvalKey ? { approvalKey: p.approvalKey } : {}),
+                },
                 scopeLabel: scopeId as ScopeId,
                 author: actor.id,
               }),
@@ -2142,7 +2181,13 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             const decisionEntry = await withManagedRosterVersion(() =>
               deps.sessions.append(lease, {
                 type: "approval_resolved",
-                payload: { requestId: input.approval!.requestId, command: p.command, approved: true, scope },
+                payload: {
+                  requestId: input.approval!.requestId,
+                  command: p.command,
+                  approved: true,
+                  scope,
+                  ...(p.approvalKey ? { approvalKey: p.approvalKey } : {}),
+                },
                 scopeLabel: scopeId as ScopeId,
                 author: actor.id,
               }),
@@ -2376,7 +2421,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         if (ambientTurn) assignSessionTitle();
 
         if (input.runId) {
-          if ((input.surface === "slack" || input.surface === "monitor") && input.runLeaseToken) {
+          if ((caps.replyEngagement || input.surface === "monitor") && input.runLeaseToken) {
             await deps.runs
               ?.setDeliveryState(input.runId, input.runLeaseToken, { replying: true })
               .catch(swallowAs("orchestrator: persist reply engagement", false));
@@ -2508,7 +2553,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             sourceSessionId: session.id,
           });
         const earlyTaskAck =
-          input.surface === "slack" &&
+          caps.earlyAck &&
           humanInput &&
           conversation.kind === "dm" &&
           !input.approval &&
@@ -2701,7 +2746,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           memoryScopeId,
           ...(memoryAccess ? { memoryAccess } : {}),
           ...(!external && deps.mcp ? { mcp: deps.mcp } : {}),
-          ...(input.surface === "slack" ? { actingSlackUserId: actor.id } : {}),
+          ...(caps.actingUserId ? { actingSlackUserId: actor.id } : {}),
           ...(deps.deploymentLayer
             ? {
                 layerAuth: {
@@ -3696,7 +3741,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
 
         const stagedAttachments = attachStaging.staged();
         const harvestedAck = (() => {
-          if (input.surface !== "slack" || input.surfaceTools || !input.runId) return undefined;
+          if (!caps.harvestedAck || input.surfaceTools || !input.runId) return undefined;
           const fb = deps.turnStream?.firstBlock(input.runId);
           const text = fb?.text.trim();
           return fb?.closed && text ? text : undefined;

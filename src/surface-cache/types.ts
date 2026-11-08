@@ -78,6 +78,7 @@ export interface ReadMessagesOpts {
   before?: string;
   includeDeleted?: boolean;
   noFallback?: boolean;
+  orderBy?: "ts" | "createdAt";
 }
 
 interface RevisedSinceOpts {

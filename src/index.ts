@@ -12,6 +12,10 @@ import { errMessage, reportFailureAs } from "./util/errors.ts";
 import { slackAccountConfigsFromEnv, slackPluginConfigFromEnv, startSlackPlugin } from "./slack/index.ts";
 import { createSlackRuntimeReconciler } from "./surfaces/slack-runtime.ts";
 import { migrateRegisteredPgSchemas } from "./persistence/pg-pool.ts";
+import { createFeishuCore, feishuPluginConfigFromEnv, startFeishuSurface, type FeishuSurface } from "./feishu/index.ts";
+import type { FeishuCardEndpoint } from "./feishu/http.ts";
+import type { FeishuCardAction } from "./feishu/payloads.ts";
+import type { FeishuCardResponse } from "./feishu/handler.ts";
 
 const config = loadConfig();
 
@@ -36,8 +40,19 @@ const managedSlack = process.env.QM_SLACK_SERVICE_URL
         config.backgroundWorkEnabled || config.backgroundDeploymentId ? () => slackRuntime.reconcile() : undefined,
     })
   : undefined;
+const feishuConfig = feishuPluginConfigFromEnv(process.env);
+let feishuSurface: FeishuSurface | undefined;
+let feishuCardHandler: ((action: FeishuCardAction) => Promise<FeishuCardResponse | undefined>) | undefined;
+const feishuCard: FeishuCardEndpoint | undefined =
+  feishuConfig && (feishuConfig.verificationToken || feishuConfig.encryptKey)
+    ? {
+        ...(feishuConfig.verificationToken ? { verificationToken: feishuConfig.verificationToken } : {}),
+        ...(feishuConfig.encryptKey ? { encryptKey: feishuConfig.encryptKey } : {}),
+        handle: (action) => feishuCardHandler?.(action) ?? Promise.resolve(undefined),
+      }
+    : undefined;
 const server = createServer(built.app, {
-  ...serverDeps(config, built, slackEnvironmentState, envSlackConfig?.botToken),
+  ...serverDeps(config, built, slackEnvironmentState, envSlackConfig?.botToken, feishuCard, feishuConfig ?? undefined),
   managedSlack,
 });
 
@@ -54,6 +69,29 @@ server.listen(config.port, () => {
       `workers=${config.workers}, backgroundWork=${config.backgroundWorkEnabled})`,
   );
 });
+
+if (feishuConfig) {
+  try {
+    feishuSurface = await startFeishuSurface({
+      config: feishuConfig,
+      core: createFeishuCore(
+        built.app,
+        built.blobTransfer,
+        built.sessions,
+        built.keychainApprovals,
+        built.identity,
+        built.directory,
+        built.inboxEvent,
+      ),
+      leaderLease: built.leaderLease,
+      directory: built.directory,
+    });
+    feishuCardHandler = feishuSurface.handleCardAction;
+    console.log(`[qm] feishu connected as ${feishuSurface.channel.botIdentity?.name ?? "bot"}`);
+  } catch (error) {
+    console.error("[qm] feishu start failed:", errMessage(error));
+  }
+}
 
 if (config.deployAppsDomain) {
   const domain = config.deployAppsDomain;
@@ -183,6 +221,7 @@ function shutdown(signal: string): void {
   void slackRuntime.stop().catch((e: unknown) => console.error("[qm] slack plugin stop failed:", errMessage(e)));
   for (const runtime of slackAccountRuntimes)
     void runtime.stop().catch((e: unknown) => console.error("[qm] slack account stop failed:", errMessage(e)));
+  void feishuSurface?.stop().catch((e: unknown) => console.error("[qm] feishu stop failed:", errMessage(e)));
   void built.scheduler.stop().catch((e: unknown) => console.error("[qm] scheduler stop failed:", errMessage(e)));
   built.deploymentLayerRefresh.stop();
   server.close();

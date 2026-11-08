@@ -37,7 +37,8 @@ export function createInboxRealtime(deps: InboxRealtimeDeps): {
       const adapter = sourceAdapter(event.source);
       if (!adapter) return;
       for (const loop of await inboxLoops()) {
-        const owner = Boolean(event.senderEmail && event.senderEmail.toLowerCase() === loop.owner.toLowerCase());
+        const sender = event.senderId ?? event.senderEmail;
+        const owner = Boolean(sender && sender.toLowerCase() === loop.owner.toLowerCase());
         const matched = (await deps.items.byLoop(loop.id)).filter(
           (item) =>
             (item.source ?? item.sourcePayload?.source) === event.source &&

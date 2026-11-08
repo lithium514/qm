@@ -55,6 +55,7 @@ export interface OAuthProviderConfig {
   egressRule: string[];
   setupGuide: OAuthSetupGuide;
   scopeParam?: string;
+  scopeSeparator?: string;
   authParams?: Record<string, string>;
   exchange?: OAuthExchangeAdapter;
   refresh?: OAuthRefreshAdapter | null;
@@ -75,7 +76,7 @@ const realFetch: FetchLike = (url, init) => publicFetch(url, { ...init, signal: 
 
 function parseScopes(raw: unknown): string[] | undefined {
   if (Array.isArray(raw)) return raw.map(String);
-  if (typeof raw === "string" && raw.trim()) return raw.trim().split(/\s+/);
+  if (typeof raw === "string" && raw.trim()) return raw.trim().split(/[\s,]+/);
   return undefined;
 }
 
@@ -87,12 +88,13 @@ function toToken(
 ): OAuthToken {
   const access = String(raw.access_token ?? "");
   const refresh = raw.refresh_token ? String(raw.refresh_token) : fallbackRefresh;
-  const expiresIn = typeof raw.expires_in === "number" ? raw.expires_in : undefined;
+  const expiresIn = Number(raw.expires_in);
+  const expiresAt = Number.isFinite(expiresIn) && expiresIn > 0 ? now + expiresIn * 1000 : undefined;
   const scopes = grantedScopes ?? parseScopes(raw.scope);
   return {
     accessToken: access,
     ...(refresh ? { refreshToken: refresh } : {}),
-    ...(expiresIn ? { expiresAt: now + expiresIn * 1000 } : {}),
+    ...(expiresAt ? { expiresAt } : {}),
     ...(scopes ? { grantedScopes: scopes } : {}),
   };
 }
@@ -225,6 +227,51 @@ const slackExchange: OAuthExchangeAdapter = async ({ provider, client, code, red
   return { hosts: provider.hosts, token: { accessToken: access, ...(grantedScopes ? { grantedScopes } : {}) } };
 };
 
+function feishuBody(raw: Record<string, unknown>): Record<string, unknown> {
+  return isObj(raw.data) ? raw.data : raw;
+}
+
+const feishuExchange: OAuthExchangeAdapter = async ({ provider, client, code, redirectUri, fetchImpl, now }) => {
+  const res = await fetchImpl(provider.tokenUrl, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify({
+      grant_type: "authorization_code",
+      client_id: client.id,
+      client_secret: client.secret,
+      code,
+      redirect_uri: redirectUri,
+    }),
+  });
+  if (!res.ok) throw await oauthFailure("feishu token exchange", res);
+  const raw = (await res.json()) as Record<string, unknown>;
+  const data = feishuBody(raw);
+  if (!String(data.access_token ?? ""))
+    throw new Error(`feishu oauth error: ${oauthErrorDetail(raw) || String(raw.msg ?? raw.code ?? "no access_token")}`);
+  return { hosts: provider.hosts, token: toToken(data, undefined, now) };
+};
+
+const feishuRefresh: OAuthRefreshAdapter = async ({ provider, client, token, fetchImpl, now }) => {
+  const res = await fetchImpl(provider.tokenUrl, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify({
+      grant_type: "refresh_token",
+      client_id: client.id,
+      client_secret: client.secret,
+      refresh_token: token.refreshToken ?? "",
+    }),
+  });
+  if (!res.ok) throw await oauthFailure("feishu token refresh", res);
+  const raw = (await res.json()) as Record<string, unknown>;
+  const data = feishuBody(raw);
+  if (!String(data.access_token ?? ""))
+    throw new Error(
+      `feishu refresh error: ${oauthErrorDetail(raw) || String(raw.msg ?? raw.code ?? "no access_token")}`,
+    );
+  return toToken(data, token.refreshToken, now, token.grantedScopes);
+};
+
 const notionExchange: OAuthExchangeAdapter = async ({ provider, client, code, redirectUri, fetchImpl }) => {
   const basic = Buffer.from(`${client.id}:${client.secret}`).toString("base64");
   const res = await fetchImpl(provider.tokenUrl, {
@@ -334,6 +381,43 @@ export const PROVIDERS: Record<string, OAuthProviderConfig> = {
       ],
       scopesRationale:
         "User-token scopes let the agent read/post, search, and edit canvases as the connecting user, not a bot.",
+    },
+  },
+
+  feishu: {
+    label: "Feishu",
+    hosts: ["open.feishu.cn"],
+    authUrl: "https://accounts.feishu.cn/open-apis/authen/v1/authorize",
+    tokenUrl: "https://open.feishu.cn/open-apis/authen/v2/oauth/token",
+    scopes: [
+      "im:message",
+      "im:message.send_as_user",
+      "im:message.p2p_msg:get_as_user",
+      "im:message.group_msg:get_as_user",
+      "im:chat:readonly",
+      "im:chat.members:read",
+      "im:resource",
+      "contact:user.base:readonly",
+      "offline_access",
+    ],
+    clientIdEnv: "FEISHU_APP_ID",
+    clientSecretEnv: "FEISHU_APP_SECRET",
+    redirectPath: "feishu/callback",
+    consentMode: "standard",
+    egressRule: ["open.feishu.cn", "accounts.feishu.cn"],
+    exchange: feishuExchange,
+    refresh: feishuRefresh,
+    setupGuide: {
+      console: "Feishu Open Platform → App → Security settings",
+      url: "https://open.feishu.cn/app",
+      steps: [
+        "Use the self-built QM app's App ID and App Secret.",
+        "Add the redirect URL shown below under 安全设置 → 重定向 URL.",
+        "Grant the Feishu user scopes listed here and publish the app.",
+        "Link the account from Admin → Connectors → Feishu.",
+      ],
+      scopesRationale:
+        "User scopes let loops read the user's chats and send drafts as the user; offline_access keeps the refresh token alive.",
     },
   },
 
@@ -674,7 +758,7 @@ export function authorizeUrl(
     q.set("code_challenge", opts.codeChallenge);
     q.set("code_challenge_method", "S256");
   }
-  q.set(p.scopeParam ?? "scope", scopes.join(" "));
+  q.set(p.scopeParam ?? "scope", scopes.join(p.scopeSeparator ?? " "));
   for (const [k, v] of Object.entries(p.authParams ?? {})) q.set(k, v);
   if (accountType === "company" && opts.client.hostedDomain) q.set("hd", opts.client.hostedDomain);
   return `${p.authUrl}?${q.toString()}`;

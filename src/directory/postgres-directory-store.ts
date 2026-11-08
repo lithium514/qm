@@ -472,6 +472,73 @@ export function createPostgresDirectoryStore(connectionString: string): Director
       return rows.length > 0 ? (rows[0]!.is_private as boolean) : undefined;
     },
 
+    async upsertMembers(members) {
+      const rows = members.filter(
+        (m) => m.principalId && m.displayName && (m.type === "internal" || m.type === "guest"),
+      );
+      if (!rows.length) return;
+      await q(
+        `INSERT INTO directory_members (org_id, principal_id, display_name, display_name_lc, type, slack_id, avatar_url)
+         SELECT $1, * FROM unnest($2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[])
+         ON CONFLICT (org_id, principal_id) DO UPDATE SET
+           display_name = EXCLUDED.display_name,
+           display_name_lc = EXCLUDED.display_name_lc,
+           type = EXCLUDED.type,
+           slack_id = EXCLUDED.slack_id,
+           avatar_url = EXCLUDED.avatar_url`,
+        [
+          orgId,
+          rows.map((m) => m.principalId),
+          rows.map((m) => m.displayName),
+          rows.map((m) => normDirectoryQuery(m.displayName)),
+          rows.map((m) => m.type),
+          rows.map((m) => m.slackId ?? null),
+          rows.map((m) => m.avatarUrl ?? null),
+        ],
+      );
+    },
+
+    async upsertChannels(channels, channelMembers) {
+      const list = channels.filter((c) => c.channelId && c.name);
+      if (!list.length) return;
+      const ids = list.map((c) => c.channelId);
+      const memberships = dedupMemberships(channelMembers).filter((m) => ids.includes(m.channelId));
+      await withPgTransaction(await pool(), async (client) => {
+        await client.query(
+          `INSERT INTO directory_channels (org_id, channel_id, name, name_lc, is_private, is_external, roster_known, observed_at)
+           SELECT $1, rows.*, $8::bigint FROM unnest($2::text[], $3::text[], $4::text[], $5::boolean[], $6::boolean[], $7::boolean[]) AS rows
+           ON CONFLICT (org_id, channel_id) DO UPDATE SET
+             name = EXCLUDED.name,
+             name_lc = EXCLUDED.name_lc,
+             is_private = EXCLUDED.is_private,
+             is_external = EXCLUDED.is_external,
+             roster_known = TRUE,
+             observed_at = EXCLUDED.observed_at`,
+          [
+            orgId,
+            ids,
+            list.map((c) => c.name),
+            list.map((c) => normDirectoryQuery(c.name)),
+            list.map((c) => !!c.isPrivate),
+            list.map((c) => !!c.isExternal),
+            list.map(() => true),
+            Date.now(),
+          ],
+        );
+        await client.query("DELETE FROM directory_channel_members WHERE org_id = $1 AND channel_id = ANY($2::text[])", [
+          orgId,
+          ids,
+        ]);
+        if (memberships.length) {
+          await client.query(
+            `INSERT INTO directory_channel_members (org_id, channel_id, principal_id)
+             SELECT $1, * FROM unnest($2::text[], $3::text[]) ON CONFLICT DO NOTHING`,
+            [orgId, memberships.map((m) => m.channelId), memberships.map((m) => m.principalId)],
+          );
+        }
+      });
+    },
+
     async replaceGroups(groupMembers, syncedAt, groupIds, groupRosterIds) {
       const allRows = dedupPairs(
         groupMembers,

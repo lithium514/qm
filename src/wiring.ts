@@ -110,6 +110,10 @@ import { installSeedSkills } from "./skills/seed.ts";
 import { createPostgresMapFactory, type DurableMap } from "./persistence/durable-map.ts";
 import type { PersistedUiState, UiStateStore } from "./surfaces/ui-state.ts";
 import { installSharedCanvas } from "./surfaces/ui-canvas.ts";
+import type { ConversationEvent } from "./loops/sources/adapter.ts";
+import type { FeishuPluginConfig } from "./feishu/config.ts";
+import { feishuUserClientFactory } from "./loops/sources/feishu.ts";
+import { feishuUserReaderFactory } from "./feishu/read.ts";
 import { slackUserClientFactory } from "./loops/sources/slack.ts";
 import { configurePgCaTrust, configurePgPooling } from "./persistence/pg-pool.ts";
 import { createPostgresLeaderLease, type LeaderLease } from "./persistence/leader-lease.ts";
@@ -494,6 +498,7 @@ export interface BuiltApp {
   keychain?: Keychain;
   serviceCreds: ServiceCredentialStore;
   deliveries: DeliveryStore;
+  leaderLease: LeaderLease;
   keychainApprovals?: KeychainApprovals;
   fireAskResolution?: (ask: KeychainAsk, grant?: KeychainGrant) => Promise<unknown>;
   fireDropResolution?: (drop: DropResolution) => Promise<unknown>;
@@ -526,6 +531,7 @@ export interface BuiltApp {
   sessionShareBytes: DurableByteStore;
   skillSyncEngine: SkillSyncEngine;
   slackCore: SlackCoreClient;
+  inboxEvent: (event: ConversationEvent) => Promise<void>;
 }
 
 const MEMORY_CAPTURE_ENTRY_WINDOW = 2_000;
@@ -3009,6 +3015,7 @@ export function buildApp(
     ...(keychain ? { keychain } : {}),
     serviceCreds,
     deliveries,
+    leaderLease,
     ...(keychainApprovals ? { keychainApprovals } : {}),
     ...(askResolution ? { fireAskResolution: askResolution } : {}),
     ...(dropResolution ? { fireDropResolution: dropResolution } : {}),
@@ -3051,6 +3058,7 @@ export function buildApp(
         : createLocalDurableByteStore(join(config.dataDir, "session-shares")),
     skillSyncEngine,
     slackCore,
+    inboxEvent: (event) => inboxRealtime.onConversationEvent(event),
   };
 }
 
@@ -3059,6 +3067,8 @@ export function serverDeps(
   built: BuiltApp,
   slackEnvironmentState: "absent" | "configured" | "partial" = "absent",
   slackEnvBotToken?: string,
+  feishuCard?: ServerDeps["feishuCard"],
+  feishuConfig?: FeishuPluginConfig,
 ): Omit<ServerDeps, "control"> {
   const deploymentModel = configuredModel(config);
   const subscriptionAuth = companySubscriptionAuth(config);
@@ -3101,6 +3111,7 @@ export function serverDeps(
     ...(config.brandingDefault ? { brandingDefault: config.brandingDefault } : {}),
     ...(subscriptionAuth ? { companySubscriptionAuth: subscriptionAuth } : {}),
     connectorTokens: built.connectorTokens,
+    ...(feishuCard ? { feishuCard } : {}),
     slackInstallation: built.slackInstallation,
     slackEnvironmentState,
     ...(config.slackEventsPort ? { slackEventsPort: config.slackEventsPort } : {}),
@@ -3193,6 +3204,12 @@ export function serverDeps(
         }
       : {}),
     loopSlackClient: slackUserClientFactory(config.slack?.apiUrl),
+    ...(feishuConfig
+      ? {
+          loopFeishuClient: feishuUserClientFactory(feishuConfig.appId, feishuConfig.appSecret),
+          loopFeishuReader: feishuUserReaderFactory(feishuConfig.appId, feishuConfig.appSecret),
+        }
+      : {}),
     sessionShares: built.sessionShares,
     sessionShareBytes: built.sessionShareBytes,
     environments: built.environments,

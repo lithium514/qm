@@ -1,0 +1,36 @@
+{
+  "scopes": {
+    "tenant": [
+      "application:application",
+      "application:application:patch",
+      "application:application:self_manage",
+      "cardkit:card:write",
+      "contact:contact.base:readonly",
+      "contact:user.base:readonly",
+      "contact:user.employee_id:readonly",
+      "contact:user.id:readonly",
+      "im:chat",
+      "im:chat:readonly",
+      "im:chat.members:read",
+      "im:message",
+      "im:message:send_as_bot",
+      "im:message.group_at_msg:readonly",
+      "im:message.p2p_msg:readonly",
+      "im:message.group_msg",
+      "im:message.reactions:read",
+      "im:message.reactions:write_only",
+      "im:resource"
+    ],
+    "user": [
+      "im:message",
+      "im:message.send_as_user",
+      "im:message.p2p_msg:get_as_user",
+      "im:message.group_msg:get_as_user",
+      "im:chat:readonly",
+      "im:chat.members:read",
+      "im:resource",
+      "contact:user.base:readonly",
+      "offline_access"
+    ]
+  }
+}

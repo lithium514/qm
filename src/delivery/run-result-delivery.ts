@@ -9,6 +9,7 @@ import { conversationScope } from "../resolution/resolution-service.ts";
 import { acquireLeaseWithin, type SessionStore } from "../sessions/session-store.ts";
 import { turnRecordedFailure } from "./web-transcript-delivery.ts";
 import { reportFailureAs } from "../util/errors.ts";
+import { surfaceCapabilities } from "../surfaces/capabilities.ts";
 
 export interface RunResultDelivery {
   destination: Destination;
@@ -63,7 +64,7 @@ export function runResultDelivery(run: Run, adminUrlFor?: AdminUrlFor): RunResul
       : {}),
   });
   if (
-    surface === "slack" &&
+    surfaceCapabilities(surface).chatRefusalCopy &&
     run.result?.status === "refused" &&
     (run.result.refusalKind === "security_quarantine" || run.result.refusalKind === "model_budget") &&
     run.request.addressed

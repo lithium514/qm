@@ -1,4 +1,5 @@
 import { commonEntrySeqs } from "../sessions/transcript-source.ts";
+import { surfaceCapabilities } from "../surfaces/capabilities.ts";
 import { isSideChatAnchor } from "../sessions/side-chat.ts";
 import { composeSoul } from "../resolution/resolution-service.ts";
 import { createCurrentScopeMembers } from "../resolution/scope-membership.ts";
@@ -208,7 +209,7 @@ export function createSessionMethods(
   };
 
   const slackDmChannel = (session: { surface?: string; threadRef: string }): string | null => {
-    if (session.surface !== "slack" || !session.threadRef.startsWith("dm:")) return null;
+    if (!surfaceCapabilities(session.surface).nativePins || !session.threadRef.startsWith("dm:")) return null;
     return session.threadRef.split(":")[1] || null;
   };
 

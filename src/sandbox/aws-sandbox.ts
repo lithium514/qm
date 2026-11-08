@@ -1,8 +1,6 @@
 import { cleanupFailedProvision } from "./sandbox.ts";
 import { DeleteObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { orgId as configOrgId } from "../config.ts";
-import type { WorkspaceLayer } from "../types.ts";
-import type { WorkspaceStore } from "../workspace/workspace-store.ts";
 import type { AdvisoryLock } from "../persistence/advisory-lock.ts";
 import type { DurableMap } from "../persistence/durable-map.ts";
 import { createKeyedQueue } from "../util/async.ts";
@@ -11,7 +9,6 @@ import { swallowAs, errMessage } from "../util/errors.ts";
 import { shq } from "../util/shell.ts";
 import { nonInteractiveShellPrefix } from "./sandbox-env.ts";
 import { createExecProcessSessions, type ExecProcessIo } from "./exec-process-session.ts";
-import { materializeRoLayers } from "./ro-layers.ts";
 import {
   createBackendBlobStaging,
   createExecExport,
@@ -42,8 +39,6 @@ const WORKSPACE_BASENAME = "workspace";
 const WORKSPACE_DIR = `${HOME_DIR}/${WORKSPACE_BASENAME}`;
 const PREP_TIMEOUT_SEC = 30;
 const HOME_TAR = "/tmp/agent-home.tar";
-const RO_LAYERS_TAR = ".ro-layers.tar";
-const RO_LAYERS_MANIFEST = ".ro-layers.manifest";
 const SNAPSHOT_PRUNE = [...HOME_SNAPSHOT_PRUNE, "./.npm", "./.aws"];
 
 const DEFAULT_INGRESS = (region: string) =>
@@ -81,7 +76,6 @@ export interface AwsSandboxOptions extends BlobStagingOptions {
   snapshotIntervalMs?: number;
   defaultTimeoutSec?: number;
   cpus?: number;
-  memoryMb?: number;
   diskGb?: number;
   store: DurableMap<StoredMicrovm>;
   advisoryLock: AdvisoryLock;
@@ -98,7 +92,7 @@ interface BodyRef {
   endpoint: string;
 }
 
-export function createAwsSandbox(workspace: WorkspaceStore, opts: AwsSandboxOptions): Sandbox {
+export function createAwsSandbox(opts: AwsSandboxOptions): Sandbox {
   const region = opts.region;
   const api =
     opts.api ??
@@ -125,7 +119,7 @@ export function createAwsSandbox(workspace: WorkspaceStore, opts: AwsSandboxOpti
   const rotateAfterMs = (opts.rotateAfterSeconds ?? 27_000) * 1000;
   const snapshotIntervalMs = opts.snapshotIntervalMs ?? 0;
   const cpus = opts.cpus ?? 4;
-  const memoryMb = opts.memoryMb ?? 8192;
+  const memoryMb = 8192;
   const diskGb = opts.diskGb ?? 8;
   const credentialPaths = opts.credentialPaths ?? [];
 
@@ -416,10 +410,8 @@ export function createAwsSandbox(workspace: WorkspaceStore, opts: AwsSandboxOpti
     ...execFileOps,
     ...blobStaging,
 
-    async provision(layers: WorkspaceLayer[], provOpts?: ProvisionOptions): Promise<SandboxHandle> {
+    async provision(scope: string, provOpts?: ProvisionOptions): Promise<SandboxHandle> {
       const scratch = provOpts?.scratch;
-      const writable = layers.find((l) => l.mode === "rw") ?? layers[0];
-      const scope = writable?.scopeId ?? "default";
       const body = scratch ? await ensureScratch(scratch.key) : await ensureBody(scope);
       const id = body.id;
       endpointById.set(id, body.endpoint);
@@ -446,18 +438,6 @@ export function createAwsSandbox(workspace: WorkspaceStore, opts: AwsSandboxOpti
           throw new Error(
             `AWS sandbox credential setup failed: ${execFailureDetail(prepared, PREP_TIMEOUT_SEC).slice(0, 200)}`,
           );
-
-        await materializeRoLayers(
-          workspace,
-          layers,
-          handle,
-          {
-            readFile: (h, rel) => sandbox.readFile(h, rel),
-            writeFileBytes: (h, rel, data) => sandbox.writeFileBytes(h, rel, data),
-            exec: (script, t) => execRaw(id, script, t),
-          },
-          { manifest: RO_LAYERS_MANIFEST, tar: RO_LAYERS_TAR, label: "aws" },
-        );
 
         return handle;
       } catch (error) {

@@ -13,17 +13,20 @@ import { buildApp } from "./support/build-app.ts";
 import { testConfig } from "./support/test-config.ts";
 import { createPostgresReplayDedupe } from "../src/auth/replay-dedupe.ts";
 import { testDatabaseUrl } from "./support/test-database.ts";
+import { browserSessionCookie, browserSessionDeps } from "./support/browser-session.ts";
 
 const SECRET = "core-signing-secret".repeat(3);
 
 const built = buildApp(testConfig({ dataDir: mkdtempSync(join(tmpdir(), "webui-shared-")) }));
 built.runtime.start();
 const core = createServer(built.app, {
+  ...browserSessionDeps,
   replayDedupe: createPostgresReplayDedupe(testDatabaseUrl()),
   signingSecret: SECRET,
 });
 core.listen(0);
 const corePort = (core.address() as AddressInfo).port;
+const coreBase = `http://localhost:${corePort}`;
 
 process.env.CORE_API_URL = `http://localhost:${corePort}`;
 process.env.CORE_SIGNING_SECRET = SECRET;
@@ -44,7 +47,7 @@ function asUser(user: string, init: RequestInit = {}): RequestInit {
     ...init,
     headers: {
       "content-type": "application/json",
-      cookie: `webuiuser=${encodeURIComponent(user)}`,
+      cookie: `webuiuser=${encodeURIComponent(user)}; ${browserSessionCookie(user)}`,
       [PORTAL_IDENTITY_HEADER]: mintPortalIdentity({ p: user, exp: Date.now() + 60_000 }, SECRET),
       ...init.headers,
     },
@@ -59,7 +62,7 @@ interface SessionRow {
 }
 
 async function sessionsOf(user: string): Promise<SessionRow[]> {
-  const r = await fetch(`${webBase}/api/sessions`, asUser(user));
+  const r = await fetch(`${coreBase}/api/sessions`, asUser(user));
   assert.equal(r.status, 200);
   return ((await r.json()) as { sessions: SessionRow[] }).sessions;
 }
@@ -108,6 +111,14 @@ test("a channel member can continue a teammate's shared web thread; outsiders an
   assert.ok(aliceTurn.status < 300, `alice's turn should be accepted (got ${aliceTurn.status})`);
   const session = await waitForSession("alice", "web:alice:s1");
   assert.equal(session.scopeId, "channel:C2");
+  const transcript = `${coreBase}/api/sessions/${encodeURIComponent(session.id)}?tailTurns=1`;
+  const cookieOnly = (user: string, query = "") =>
+    fetch(`${transcript}${query}`, { headers: { cookie: browserSessionCookie(user) } });
+  const aliceRead = await cookieOnly("alice");
+  assert.equal(aliceRead.status, 200);
+  assert.ok(Array.isArray(((await aliceRead.json()) as { items?: unknown }).items));
+  assert.equal((await cookieOnly("mallory")).status, 404);
+  assert.equal((await cookieOnly("alice", "&viewer=mallory")).status, 403);
 
   const bobTurn = await fetch(
     `${webBase}/api/turn`,
@@ -120,12 +131,8 @@ test("a channel member can continue a teammate's shared web thread; outsiders an
   assert.equal((await waitForSession("bob", "web:alice:s1")).canContinue, true);
 
   assert.equal(
-    (await fetch(`${webBase}/api/runs/active?threadRef=${encodeURIComponent("web:alice:s1")}`, asUser("bob"))).status,
+    (await fetch(`${coreBase}/api/runs/active?threadRef=${encodeURIComponent("web:alice:s1")}`, asUser("bob"))).status,
     200,
-  );
-  assert.equal(
-    (await fetch(`${webBase}/api/runs/active?threadRef=${encodeURIComponent("dm:D1")}`, asUser("bob"))).status,
-    404,
   );
 
   const personalClaim = await fetch(

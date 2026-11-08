@@ -1,4 +1,3 @@
-import { canonicalPerson } from "../../../directory/person.ts";
 import { parseScopeId, personalScope, type ScopeId } from "../../../types.ts";
 import type { Cron } from "../../../triggers/types.ts";
 import type { SessionOrigin, SessionStore, SpendRow } from "../../../sessions/session-store.ts";
@@ -21,7 +20,7 @@ export function cacheHitRatio(s: { cacheRead?: number; cacheWrite?: number; unca
 
 const DAY_MS = 86_400_000;
 const DEFAULT_WINDOW_DAYS = 30;
-const EXPORT_MAX_DAYS = 93;
+const MAX_SPEND_DAYS = 93;
 const CRON_LOOKUP_CONCURRENCY = 8;
 const SPEND_EXPORT_PRINCIPAL = "spend-export";
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
@@ -72,6 +71,7 @@ interface SpendTotals {
 }
 
 interface SpendEntity extends SpendTotals {
+  userId: string | null;
   principalId: string | null;
   scopeId: ScopeId;
   kind: string;
@@ -125,7 +125,10 @@ export interface SpendSummaryOptions {
   bucket: SpendBucket;
   label: (scopeId: ScopeId) => string;
   cron: (cronId: string) => SpendCronInfo | null;
+  person: PersonOf;
 }
+
+export type PersonOf = (ref: string) => { userId: string | null; principalId: string };
 
 interface Tally {
   costUsd: number;
@@ -137,6 +140,7 @@ interface Tally {
 }
 
 interface EntityAccumulator {
+  userId: string | null;
   principalId: string | null;
   scopeId: ScopeId;
   kind: string;
@@ -226,12 +230,17 @@ function totalsOf(bySource: Record<SpendSource, Tally>): SpendTotals {
   };
 }
 
-function resolveScope(scopeId: ScopeId): { key: ScopeId; person: string | null; kind: string } {
+function resolveScope(
+  scopeId: ScopeId,
+  personOf: PersonOf,
+): { key: ScopeId; person: string | null; userId: string | null; kind: string } {
   const parsed = parseScopeId(scopeId);
-  const person = parsed.kind === "personal" && parsed.ref ? canonicalPerson(parsed.ref) : null;
+  const resolved = parsed.kind === "personal" && parsed.ref ? personOf(parsed.ref) : null;
+  const person = resolved?.principalId ?? null;
   return {
     key: person === null ? scopeId : personalScope(person),
     person,
+    userId: resolved?.userId ?? null,
     kind: person === null ? (parsed.kind ?? "unknown") : "person",
   };
 }
@@ -242,6 +251,7 @@ function displayNameOf(sources: readonly ScopeId[], label: (scopeId: ScopeId) =>
 
 function entityOf(acc: EntityAccumulator, label: (scopeId: ScopeId) => string): SpendEntity {
   return {
+    userId: acc.userId,
     principalId: acc.principalId,
     scopeId: acc.scopeId,
     kind: acc.kind,
@@ -275,10 +285,10 @@ export function summarizeSpend(rows: readonly SpendRow[], opts: SpendSummaryOpti
   const cronBuckets = new Map<string, { scopeId: ScopeId; bySource: Record<SpendSource, Tally> }>();
   const orgSources = emptySources();
   for (const row of rows) {
-    const { key, person, kind } = resolveScope(row.scopeId);
+    const { key, person, userId, kind } = resolveScope(row.scopeId, opts.person);
     let acc = accumulators.get(key);
     if (!acc) {
-      acc = { principalId: person, scopeId: key, kind, sources: [], bySource: emptySources() };
+      acc = { userId, principalId: person, scopeId: key, kind, sources: [], bySource: emptySources() };
       accumulators.set(key, acc);
     }
     if (!acc.sources.includes(row.scopeId)) acc.sources.push(row.scopeId);
@@ -367,11 +377,15 @@ export function summarizeSpend(rows: readonly SpendRow[], opts: SpendSummaryOpti
   };
 }
 
-export function spendExportRows(rows: readonly SpendRow[], label: (scopeId: ScopeId) => string): SpendExportRow[] {
+export function spendExportRows(
+  rows: readonly SpendRow[],
+  label: (scopeId: ScopeId) => string,
+  personOf: PersonOf,
+): SpendExportRow[] {
   const sources = new Map<ScopeId, ScopeId[]>();
   const merged = new Map<string, SpendExportRow>();
   for (const row of rows) {
-    const { key: scopeId, person, kind } = resolveScope(row.scopeId);
+    const { key: scopeId, person, kind } = resolveScope(row.scopeId, personOf);
     const seen = sources.get(scopeId);
     if (!seen) sources.set(scopeId, [row.scopeId]);
     else if (!seen.includes(row.scopeId)) seen.push(row.scopeId);
@@ -478,11 +492,30 @@ function parseBound(raw: string): number | null {
   return Number.isSafeInteger(parsed) && Number.isFinite(new Date(parsed).getTime()) ? parsed : null;
 }
 
+function spendBucket(url: URL): SpendBucket | null {
+  const bucket = url.searchParams.get("bucket") ?? "day";
+  return bucket === "day" || bucket === "week" ? bucket : null;
+}
+
+function spendDays(url: URL): { from: number; to: number } | string {
+  const from = parseDay(url.searchParams.get("from") ?? "");
+  const to = parseDay(url.searchParams.get("to") ?? "");
+  if (from === null || to === null) return "from and to must be YYYY-MM-DD dates (UTC)";
+  if (to <= from || to - from > MAX_SPEND_DAYS * DAY_MS)
+    return `to must be later than from and at most ${MAX_SPEND_DAYS} days after it`;
+  return { from, to };
+}
+
 async function loadSpendRows(
   sessions: SessionStore,
   range: { from: number; to: number },
 ): Promise<{ rows: SpendRow[]; asOf?: number }> {
   return sessions.spendReport ? sessions.spendReport(range) : { rows: await sessions.spendRollup(range) };
+}
+
+function cronInfo(cron: Cron): SpendCronInfo {
+  const { id, title, message, action, owner, ownerScopeId, schedule, enabled, archived } = cron;
+  return { id, title, message, action, owner, ownerScopeId, schedule, enabled, archived };
 }
 
 async function cronInfoLookup(
@@ -493,13 +526,22 @@ async function cronInfoLookup(
   const crons = new Map<string, SpendCronInfo>();
   for (let start = 0; start < ids.length; start += CRON_LOOKUP_CONCURRENCY) {
     const batch = await Promise.all(ids.slice(start, start + CRON_LOOKUP_CONCURRENCY).map((id) => app.getCron(id)));
-    for (const cron of batch) {
-      if (!cron) continue;
-      const { id, title, message, action, owner, ownerScopeId, schedule, enabled, archived } = cron;
-      crons.set(id, { id, title, message, action, owner, ownerScopeId, schedule, enabled, archived });
-    }
+    for (const cron of batch) if (cron) crons.set(cron.id, cronInfo(cron));
   }
   return crons;
+}
+
+async function peopleOf(deps: BaseCtx["deps"], rows: readonly { scopeId: ScopeId }[]): Promise<PersonOf> {
+  const refs = new Set<string>();
+  for (const { scopeId } of rows) {
+    const parsed = parseScopeId(scopeId);
+    if (parsed.kind === "personal" && parsed.ref) refs.add(parsed.ref);
+  }
+  const users = (await deps.admin?.users.resolve([...refs])) ?? new Map();
+  return (ref) => {
+    const user = users.get(ref);
+    return user ? { userId: user.id, principalId: user.principalId } : { userId: null, principalId: ref };
+  };
 }
 
 export async function spendExport(ctx: BaseCtx): Promise<void> {
@@ -510,16 +552,10 @@ export async function spendExport(ctx: BaseCtx): Promise<void> {
   if (typeof authorization !== "string" || !constantTimeEqual(authorization, `Bearer ${token}`))
     return sendJson(res, 401, { error: "unauthorized" });
   if (!deps.sessions) return sendJson(res, 503, { error: "spend_unavailable" });
-  const from = parseDay(url.searchParams.get("from") ?? "");
-  const to = parseDay(url.searchParams.get("to") ?? "");
-  if (from === null || to === null)
-    return sendJson(res, 400, { error: "bad_request", message: "from and to must be YYYY-MM-DD dates (UTC)" });
-  if (to <= from || to - from > EXPORT_MAX_DAYS * DAY_MS)
-    return sendJson(res, 400, {
-      error: "bad_request",
-      message: `to must be later than from and at most ${EXPORT_MAX_DAYS} days after it`,
-    });
-  const { rows, asOf } = await loadSpendRows(deps.sessions, { from, to });
+  const days = spendDays(url);
+  if (typeof days === "string") return sendJson(res, 400, { error: "bad_request", message: days });
+  const { from, to } = days;
+  const { rows, asOf } = await loadSpendRows(deps.sessions, days);
   const labels = await discoverScopes(
     app,
     deps,
@@ -527,7 +563,7 @@ export async function spendExport(ctx: BaseCtx): Promise<void> {
   );
   const scope = orgScope(deps);
   const window = { from: isoDay(from / DAY_MS), to: isoDay(to / DAY_MS) };
-  const exported = spendExportRows(rows, (id) => labels.get(id) ?? "");
+  const exported = spendExportRows(rows, (id) => labels.get(id) ?? "", await peopleOf(deps, rows));
   const crons: SpendExportCron[] = [...(await cronInfoLookup(app, exported)).values()]
     .sort((a, b) => byCodePoint(a.id, b.id))
     .map(({ id, title, owner, ownerScopeId, schedule, enabled, archived }) => ({
@@ -557,8 +593,8 @@ export async function spend(ctx: ApiCtx): Promise<void> {
   audit(deps, { principalId: actor.id, action: "spend.read", resource: "spend", scopeLabel: scope });
 
   const bad = (message: string) => sendJson(res, 400, { error: "bad_request", message });
-  const bucket = url.searchParams.get("bucket") ?? "day";
-  if (bucket !== "day" && bucket !== "week") return bad('bucket must be "day" or "week"');
+  const bucket = spendBucket(url);
+  if (!bucket) return bad('bucket must be "day" or "week"');
   const format = url.searchParams.get("format") ?? "json";
   if (format !== "json" && format !== "csv") return bad('format must be "json" or "csv"');
 
@@ -589,6 +625,7 @@ export async function spend(ctx: ApiCtx): Promise<void> {
     bucket,
     label: (id) => labels.get(id) ?? "",
     cron: (cronId) => crons.get(cronId) ?? null,
+    person: await peopleOf(deps, rows),
   });
   if (format === "json")
     return sendJson(res, 200, { scopeId: scope, ...report, ...(asOf === undefined ? {} : { asOf }) });
@@ -604,4 +641,45 @@ export async function spend(ctx: ApiCtx): Promise<void> {
   });
   res.end(body);
   return;
+}
+
+export async function selfSpend(ctx: ApiCtx): Promise<void> {
+  const { res, app, deps, url } = ctx;
+  const bad = (message: string) => sendJson(res, 400, { error: "bad_request", message });
+  const principalId = url.searchParams.get("principalId");
+  if (!principalId) return bad("principalId required");
+  const days = spendDays(url);
+  if (typeof days === "string") return bad(days);
+  const bucket = spendBucket(url);
+  if (!bucket) return bad('bucket must be "day" or "week"');
+  if (!deps.sessions) return sendJson(res, 503, { error: "spend_unavailable" });
+
+  const [contexts, crons, { rows, asOf }] = await Promise.all([
+    app.listContexts(principalId),
+    app.listCronsForViewer(principalId),
+    loadSpendRows(deps.sessions, days),
+  ]);
+  const person = await peopleOf(deps, [...rows, { scopeId: personalScope(principalId) }]);
+  const me = resolveScope(personalScope(principalId), person).key;
+  const shared = new Map(
+    contexts.flatMap((context) =>
+      context.kind === "personal" ? [] : [[context.scopeId, context.name ?? ""] as const],
+    ),
+  );
+  const info = new Map([...crons.owned, ...crons.visible].map((cron) => [cron.id, cronInfo(cron)]));
+  const owned = new Set(crons.owned.map((cron) => cron.id));
+  const visible = new Set(
+    [...new Set(rows.map((row) => row.scopeId))].filter((id) => shared.has(id) || resolveScope(id, person).key === me),
+  );
+  const report = summarizeSpend(
+    rows.filter((row) => visible.has(row.scopeId)),
+    { ...days, bucket, label: (id) => shared.get(id) ?? "", cron: (id) => info.get(id) ?? null, person },
+  );
+  audit(deps, { principalId, action: "spend.self.read", resource: "spend", scopeLabel: me });
+  return sendJson(res, 200, {
+    scopeId: me,
+    ...report,
+    crons: report.crons.map((cron) => ({ ...cron, owned: owned.has(cron.cronId) })),
+    ...(asOf === undefined ? {} : { asOf }),
+  });
 }

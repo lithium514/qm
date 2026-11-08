@@ -219,8 +219,6 @@ export function createFeishuMessageHandler(
       deliveryTarget: feishuDeliveryTarget(message.chatId, threadId),
       text: message.content,
       origin: { kind: "human", messageTs: message.messageId },
-      triggerTs: message.messageId,
-      liveActor: true,
       addressed,
       redeliveryKey: `feishu:${deps.config.appId}:${message.messageId}`,
       async: true,

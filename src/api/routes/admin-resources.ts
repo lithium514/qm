@@ -1,3 +1,4 @@
+import { parseSpendLimit, type SpendLimit } from "../../ratelimit/spend-limits.ts";
 import type { TeamChange } from "../../teams/teams.ts";
 import { decisionsResource } from "./decisions-resource.ts";
 import { parseAckEmoji } from "../../slack/config.ts";
@@ -37,59 +38,11 @@ import { PROVIDERS, type ConsentMode } from "../../connectors/oauth.ts";
 import { encodeRef, serviceCredRef } from "../../acl/resource-ref.ts";
 import { audit } from "./shared.ts";
 import { reportFailure, swallowAs } from "../../util/errors.ts";
-import {
-  DEFAULT_SECURITY_SCREEN_RUBRIC,
-  parseSecurityPosture,
-  SECURITY_POSTURES,
-  type SecurityPosture,
-} from "../../security/security-posture.ts";
+import { parseSecurityPosture, SECURITY_POSTURES, type SecurityPosture } from "../../security/security-posture.ts";
 import type { ApprovalGrantModes } from "../../types.ts";
 import { parseEgressPolicy } from "../../resolution/egress-policy.ts";
 import { FEATURE_NAMES, FEATURES, type FeatureName } from "../../feature-flags.ts";
 import { parseSharingPosture, SHARING_POSTURES, type SharingPosture } from "../../resolution/sharing-posture.ts";
-
-export interface AutoFlaggerDraft {
-  modelId: string;
-  rubric: string;
-}
-
-const AUTO_FLAGGER_MAX_RUBRIC_CHARS = 20_000;
-
-/** The flagger a deployment falls back to when nothing is configured. */
-export function defaultAutoFlaggerConfig(deps: Pick<ServerDeps, "baseModelDefault">): AutoFlaggerDraft {
-  return {
-    modelId: defaultModel(deps.baseModelDefault),
-    rubric: DEFAULT_SECURITY_SCREEN_RUBRIC,
-  };
-}
-
-/**
- * Validate an Auto flagger configuration — shared by the governance save and the test run, so a
- * rubric that tests cleanly is exactly the one that can be applied.
- */
-export async function parseAutoFlaggerDraft(
-  deps: Pick<ServerDeps, "providerKeys" | "modelCredentials">,
-  body: { modelId?: unknown; rubric?: unknown },
-): Promise<{ value: AutoFlaggerDraft } | { error: string }> {
-  if (typeof body.modelId !== "string" || !body.modelId.trim()) {
-    return { error: "auto-flagger requires a modelId" };
-  }
-  const modelId = body.modelId.trim();
-  if (!modelSupported(modelId)) {
-    return { error: `model ${modelId} is not supported` };
-  }
-  if (typeof body.rubric !== "string" || !body.rubric.trim() || body.rubric.length > AUTO_FLAGGER_MAX_RUBRIC_CHARS) {
-    return {
-      error: `auto-flagger requires a non-empty rubric of at most ${AUTO_FLAGGER_MAX_RUBRIC_CHARS} characters`,
-    };
-  }
-  const configuredKeys = deps.providerKeys ?? ALL_PROVIDERS_AVAILABLE;
-  const managedKeys = deps.modelCredentials ? await deps.modelCredentials.availability() : configuredKeys;
-  if (!modelServiceable(modelId, managedKeys)) {
-    return { error: `model ${modelId} isn't serviceable on this deployment` };
-  }
-  return { value: { modelId, rubric: body.rubric.trim() } };
-}
 
 type Actor = { id: string };
 
@@ -179,30 +132,6 @@ export const ADMIN_RESOURCES: readonly AdminResource[] = [
       (deps, scope, posture) =>
         posture === null ? deps.config!.clearSharingPosture(scope) : deps.config!.setSharingPosture(scope, posture),
     ),
-  },
-  {
-    id: "auto-flagger",
-    refreshesModels: true,
-    kind: "custom",
-    target: "org",
-    clearable: true,
-    label:
-      "The model and classification rubric used to screen external content when the deployment enables model screening.",
-    readKey: "autoFlagger",
-    get: (deps) => deps.config!.getAutoFlaggerConfig(),
-    apply: async (ctx, _actor, scope) => {
-      const bad = orgOnly(scope, "the Auto flagger is org-wide");
-      if (bad) return bad;
-      const body = ctx.body as { reset?: unknown };
-      if (body.reset === true) {
-        await ctx.deps.config!.setAutoFlaggerConfig(null);
-        return { ok: true };
-      }
-      const parsed = await parseAutoFlaggerDraft(ctx.deps, ctx.body as Record<string, unknown>);
-      if ("error" in parsed) return parsed;
-      await ctx.deps.config!.setAutoFlaggerConfig(parsed.value);
-      return { ok: true };
-    },
   },
   decisionsResource,
   {
@@ -389,13 +318,6 @@ export const ADMIN_RESOURCES: readonly AdminResource[] = [
       });
       return { ok: true };
     },
-  },
-  {
-    id: "unfulfilled-insights",
-    kind: "boolean",
-    readKey: "unfulfilledInsights",
-    get: (deps, scope) => deps.config!.getUnfulfilledInsights(scope),
-    apply: generic(boolBody, (deps, scope, on) => deps.config!.setUnfulfilledInsights(scope, on)),
   },
   {
     id: "external-slack-participants",
@@ -686,37 +608,6 @@ export const ADMIN_RESOURCES: readonly AdminResource[] = [
     },
   },
   {
-    id: "browse-model",
-    refreshesModels: true,
-    kind: "enum",
-    target: "org",
-    clearable: true,
-    label:
-      "The model driving the browser agent in the browse skill, org-wide (empty follows the deployment's base model; fast mode applies only on Opus models).",
-    readKey: "browseModel",
-    get enumValues() {
-      return selectableBaseModels();
-    },
-    get: (deps, scope) => deps.config!.getBrowseModel(scope),
-    apply: async (ctx, _actor, scope) => {
-      const bad = orgOnly(scope, "the browse model is org-wide");
-      if (bad) return bad;
-      const raw = (ctx.body as { modelId?: unknown }).modelId;
-      if (raw !== undefined && raw !== null && typeof raw !== "string") {
-        return { error: "browse-model requires { modelId: string } (empty string clears the override)" };
-      }
-      const modelId = typeof raw === "string" ? raw.trim() : "";
-      if (modelId && !resolveModel(modelId)) return { error: `unknown model id: ${modelId}` };
-      const configuredKeys = ctx.deps.providerKeys ?? ALL_PROVIDERS_AVAILABLE;
-      const managedKeys = ctx.deps.modelCredentials ? await ctx.deps.modelCredentials.availability() : configuredKeys;
-      if (modelId && !modelServiceable(modelId, managedKeys)) {
-        return { error: `model ${modelId} isn't serviceable on this deployment: its provider key is not configured` };
-      }
-      await ctx.deps.config!.setBrowseModel(scope, modelId || null);
-      return { ok: true };
-    },
-  },
-  {
     id: "browse-max-steps",
     kind: "string",
     target: "org",
@@ -739,6 +630,19 @@ export const ADMIN_RESOURCES: readonly AdminResource[] = [
         return { value: steps };
       },
       (deps, scope, steps) => deps.config!.setBrowseMaxSteps(scope, steps),
+    ),
+  },
+  {
+    id: "spend-limit",
+    kind: "custom",
+    target: "any",
+    label:
+      "Model spend caps in USD: { dailyUsd?, monthlyUsd? } per UTC day and month. On the org scope it is the default for each person's personal scope; on any other scope it caps that scope and overrides the default. {} means no cap there; { inherit: true } clears it.",
+    readKey: "spendLimit",
+    get: (deps, scope) => deps.config!.getSpendLimitDurable(scope),
+    apply: generic<SpendLimit | null>(
+      (body) => parseSpendLimit(body),
+      (deps, scope, limit) => deps.config!.setSpendLimit(scope, limit),
     ),
   },
   {

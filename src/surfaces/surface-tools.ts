@@ -99,10 +99,13 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
   if (strictReadOnly || !(input.surfaceTools && defaultDestination && deps.deliveries)) return undefined;
   const deliveries = deps.deliveries;
   const currentDestination = defaultDestination;
+  const textOnly = (d: Destination) => deps.surfaces.get(d.type)?.capabilities.textOnly === true;
+  const homeSurface = deps.surfaces.get(currentDestination.type);
+  const mirroredHome = homeSurface?.capabilities.mirrored ? homeSurface : undefined;
   const rateLimitRecipient =
     input.origin?.kind === "human" &&
     !isSessionTurn(input) &&
-    currentDestination.type === "slack" &&
+    homeSurface?.capabilities.nativeActor &&
     currentDestination.target
       ? { rateLimitRecipient: { target: currentDestination.target, user: actor.id } }
       : {};
@@ -156,7 +159,8 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
       { mayOpenGroup: opts?.mayOpenGroup === true },
     );
     if (!r.ok) return { ok: false, message: r.message };
-    return { ok: true, destination: r.destination };
+    const persona = currentDestination.persona;
+    return { ok: true, destination: persona ? { ...r.destination, persona } : r.destination };
   };
   const enqueue = async (
     destination: Destination,
@@ -194,10 +198,11 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
     coverageChecked = true;
     const container = currentDestination.target ?? conversation.channelRef ?? conversation.threadRef;
     if (!deps.surfaceCache || !container) return coverageSince;
-    const cacheContainer = currentDestination.type === "slack" ? container.split(":")[0]! : container;
-    const st = await deps.surfaceCache
-      .containerState(cacheContainer)
-      .catch(swallowAs("surface cache: container coverage", null));
+    const st = await (
+      mirroredHome
+        ? deps.surfaceCache.containerState(mirroredHome.containerOf(container), { surface: mirroredHome.kind })
+        : deps.surfaceCache.containerState(container)
+    ).catch(swallowAs("surface cache: container coverage", null));
     coverageSince = st?.oldestTs ? isoFromTs(st.oldestTs) || undefined : undefined;
     return coverageSince;
   };
@@ -231,10 +236,18 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
       const seq = postKeys.take();
       let destination = currentDestination;
       if (opts?.ts && destination.type !== "principal") {
-        destination = { ...destination, target: replaceThreadSegment(destination.target, opts.ts) };
+        const surface = deps.surfaces.get(destination.type);
+        destination = {
+          ...destination,
+          target: surface?.threadTarget
+            ? await surface.threadTarget(destination.target, opts.ts)
+            : replaceThreadSegment(destination.target, opts.ts),
+        };
       } else if (opts?.broadcast && destination.type !== "principal" && conversation.channelRef) {
         destination = { ...destination, target: conversation.channelRef };
       }
+      if (files?.length && textOnly(destination))
+        return { ok: false, message: "This conversation takes text messages only; nothing was sent." };
       const f = await resolveFiles(files, sandboxId);
       if (!f.ok) return { ok: false, message: f.message };
       const footer = buildDebugFooter();
@@ -283,6 +296,7 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
       if (!d.ok) return { ok: false, message: d.message };
       if (d.destination.type === "principal")
         return { ok: false, message: "I can only react to a message in a channel, group DM, or this conversation." };
+      if (textOnly(d.destination)) return { ok: false, message: "Reactions aren't supported in this conversation." };
       return enqueue(withReact(d.destination, { messageTs: input.ts, emoji: input.emoji }), "", seq);
     },
     edit: async (input: SurfaceEditInput) => {
@@ -292,6 +306,8 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
         ...(input.participants !== undefined ? { participants: input.participants } : {}),
       });
       if (!d.ok) return { ok: false, message: d.message };
+      if (d.destination.type !== "slack" && d.destination.type !== "group")
+        return { ok: false, message: "I can only edit a Slack message in a channel, group DM, or this conversation." };
       return enqueue(withEdit(d.destination, input.ref), input.text, seq);
     },
     delete: async (input: SurfaceDeleteInput) => {
@@ -301,6 +317,7 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
         ...(input.participants !== undefined ? { participants: input.participants } : {}),
       });
       if (!d.ok) return { ok: false, message: d.message };
+      if (textOnly(d.destination)) return { ok: false, message: "Messages in this conversation can't be deleted." };
       return enqueue(withDelete(d.destination, { messageTs: input.ref }), "", seq);
     },
     readThread: async (opts?: { limit?: number }) => {
@@ -410,9 +427,12 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
         });
       }
       const container = dest.target ?? conversation.channelRef ?? conversation.threadRef;
-      if (deps.surfaceCache && dest.type === "slack" && container) {
-        const channel = container.split(":")[0]!;
-        const hits = await deps.surfaceCache.search(q, { container: channel, limit });
+      if (deps.surfaceCache && mirroredHome && container) {
+        const hits = await deps.surfaceCache.search(q, {
+          surface: mirroredHome.kind,
+          container: mirroredHome.containerOf(container),
+          limit,
+        });
         return withCoverage({
           ok: true,
           hits: hits.map((hit) => ({
@@ -422,7 +442,7 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
             snippet: hit.text.slice(0, 200),
           })),
           source: "cache",
-          message: "Search covers stored Slack events only; older or missed messages may be absent.",
+          message: `Search covers stored ${mirroredHome.label} events only; older or missed messages may be absent.`,
         });
       }
       if (opts?.source === "mirror") {
@@ -445,11 +465,6 @@ export function createSurfaceToolDeps(ctx: SurfaceToolsContext): SurfaceToolDeps
         source: "live",
         ...(result.note ? { message: result.note } : {}),
       });
-    },
-    readMembers: async () => {
-      const roster = (conversation.publishMembers ?? conversation.audience).filter((p) => p.type === "internal");
-      if (!roster.length) return { ok: true, members: [] };
-      return { ok: true, members: roster.map((p) => ({ displayName: p.displayName ?? p.id })) };
     },
     getStandingOrder: async () => {
       if (!deps.channelPolicy) return { ok: false, message: "standing orders aren't available on this turn" };

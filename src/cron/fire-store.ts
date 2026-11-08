@@ -14,13 +14,15 @@ export interface CronFireStore {
   beginExclusive(cronId: string, entry: CronFireLogEntry, staleRunningMs: number): Promise<BeginFireResult>;
 
   sweepStranded(now: number, staleRunningMs: number, note: string): Promise<number>;
+  listRunning(firedAfter: number): Promise<CronFireRecord[]>;
 
   pruneEnded(opts: { endedBefore: number; keepPerCron: number }): Promise<number>;
-  backfill(cronId: string, entries: readonly CronFireLogEntry[]): Promise<void>;
   listByCron(cronId: string, opts?: { limit?: number }): Promise<{ runs: CronFireLogEntry[]; total: number }>;
   listByThreadRefs(threadRefs: readonly string[]): Promise<CronFireRecord[]>;
   latestForThread(cronId: string, threadRef: string): Promise<CronFireLogEntry | undefined>;
 }
+
+export const FIRE_RETENTION_KEEP_PER_CRON = 100;
 
 interface FireColumn {
   name: string;
@@ -51,10 +53,12 @@ const UPSERT_FIRE = `INSERT INTO cron_fires (${FIRE_COLUMNS})
    ON CONFLICT (cron_id, fire_key) DO UPDATE
      SET ${UPSERT_SET}`;
 
-const BACKFILL_CHUNK = 500;
-
 function fireParams(cronId: string, entry: CronFireLogEntry): unknown[] {
   return FIRE_COLUMN_DEFS.map((c) => c.value(cronId, entry));
+}
+
+function rowToRecord(r: Record<string, unknown>): CronFireRecord {
+  return { ...rowToEntry(r), cronId: String(r.cron_id) };
 }
 
 function rowToEntry(r: Record<string, unknown>): CronFireLogEntry {
@@ -175,6 +179,15 @@ export function createPostgresCronFireStore(connectionString: string): CronFireS
       );
       return result.rowCount;
     },
+    async listRunning(firedAfter) {
+      const rows = await q(
+        `SELECT ${FIRE_COLUMNS} FROM cron_fires
+          WHERE status = 'running' AND fired_at > $1
+          ORDER BY fired_at, fire_key`,
+        [firedAfter],
+      );
+      return rows.map(rowToRecord);
+    },
     async pruneEnded({ endedBefore, keepPerCron }) {
       return withPgTransaction(await pool(), async (client) => {
         const legacy = await client.query("SELECT to_regclass('cron_fire_log') IS NOT NULL AS present");
@@ -201,44 +214,21 @@ export function createPostgresCronFireStore(connectionString: string): CronFireS
         return result.rowCount ?? 0;
       });
     },
-    async backfill(cronId, entries) {
-      for (let start = 0; start < entries.length; start += BACKFILL_CHUNK) {
-        const chunk = entries.slice(start, start + BACKFILL_CHUNK);
-        await query(
-          `INSERT INTO cron_fires (${FIRE_COLUMNS})
-           SELECT * FROM unnest(${FIRE_COLUMN_DEFS.map((c, i) => `$${i + 1}::${c.cast}[]`).join(", ")})
-           ON CONFLICT (cron_id, fire_key) DO UPDATE
-             SET ${UPSERT_SET}
-           WHERE EXCLUDED.fired_at >= cron_fires.fired_at
-             AND (cron_fires.ended_at IS NULL OR EXCLUDED.ended_at IS NOT NULL)
-             AND ${ROW_OF("cron_fires")} IS DISTINCT FROM ${ROW_OF("EXCLUDED")}`,
-          FIRE_COLUMN_DEFS.map((c) => chunk.map((entry) => c.value(cronId, entry))),
-        );
-      }
-    },
     async listByCron(cronId, opts) {
-      if (opts?.limit !== undefined && opts.limit <= 0) {
+      const limit = opts?.limit ?? FIRE_RETENTION_KEEP_PER_CRON;
+      if (limit <= 0) {
         const counted = await q(`SELECT COUNT(*)::int AS total FROM cron_fires WHERE cron_id = $1`, [cronId]);
         return { runs: [], total: Number(counted[0]?.total ?? 0) };
       }
-      if (opts?.limit !== undefined) {
-        const rows = await q(
-          `SELECT ${FIRE_COLUMNS}, COUNT(*) OVER ()::int AS total FROM cron_fires
-            WHERE cron_id = $1
-            ORDER BY fired_at DESC, fire_key DESC
-            LIMIT $2`,
-          [cronId, opts.limit],
-        );
-        const total = rows.length ? Number(rows[0]!.total) : 0;
-        return { runs: rows.reverse().map(rowToEntry), total };
-      }
       const rows = await q(
-        `SELECT ${FIRE_COLUMNS} FROM cron_fires
+        `SELECT ${FIRE_COLUMNS}, COUNT(*) OVER ()::int AS total FROM cron_fires
           WHERE cron_id = $1
-          ORDER BY fired_at, fire_key`,
-        [cronId],
+          ORDER BY fired_at DESC, fire_key DESC
+          LIMIT $2`,
+        [cronId, limit],
       );
-      return { runs: rows.map(rowToEntry), total: rows.length };
+      const total = rows.length ? Number(rows[0]!.total) : 0;
+      return { runs: rows.reverse().map(rowToEntry), total };
     },
     async listByThreadRefs(threadRefs) {
       if (!threadRefs.length) return [];
@@ -248,7 +238,7 @@ export function createPostgresCronFireStore(connectionString: string): CronFireS
           ORDER BY fired_at, fire_key`,
         [[...threadRefs]],
       );
-      return rows.map((r) => ({ ...rowToEntry(r), cronId: r.cron_id as string }));
+      return rows.map(rowToRecord);
     },
     async latestForThread(cronId, threadRef) {
       const rows = await q(

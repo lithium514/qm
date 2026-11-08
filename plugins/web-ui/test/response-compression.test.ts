@@ -2,16 +2,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, request as httpRequest, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { releaseFiles } from "./release-fixture.ts";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { mintPortalIdentity, PORTAL_IDENTITY_HEADER } from "../../chassis/src/portal-identity.ts";
 import { sendBuffered } from "../../chassis/src/http.ts";
 
 const SECRET = "web-ui-compression-test";
 
-const sessionsPayload = JSON.stringify({
+const relayedPayload = JSON.stringify({
   sessions: Array.from({ length: 200 }, (_, i) => ({
     id: `sess-${i}`,
     title: "a repetitive session title that gzip should collapse",
@@ -26,7 +24,7 @@ const core = createServer((req: IncomingMessage, res) => {
     res,
     200,
     { "content-type": "application/json" },
-    (req.url ?? "").startsWith("/v1/sessions") ? sessionsPayload : "{}",
+    (req.url ?? "").startsWith("/v1/composio/slack") ? relayedPayload : "{}",
   );
 });
 await new Promise<void>((r) => core.listen(0, r));
@@ -35,15 +33,16 @@ process.env.CORE_API_URL = `http://localhost:${(core.address() as AddressInfo).p
 process.env.CORE_SIGNING_SECRET = SECRET;
 process.env.WEB_UI_PRINCIPALS = "alice";
 
-const assetsDir = join(dirname(fileURLToPath(import.meta.url)), "..", "dist-web", "assets");
 const assetName = "compression-fixture-Aa1Bb2Cc.js";
-const assetPath = join(assetsDir, assetName);
 const assetBody = `export const filler = ${JSON.stringify("x".repeat(50)).repeat(200)};\n`;
-mkdirSync(assetsDir, { recursive: true });
-writeFileSync(assetPath, assetBody);
-writeFileSync(`${assetPath}.gz`, gzipSync(Buffer.from(assetBody), { level: 9 }));
 
-const { handler } = await import("../server/index.ts");
+const { handler, serveReleasesFrom } = await import("../server/index.ts");
+serveReleasesFrom(
+  releaseFiles({
+    [`assets/${assetName}`]: assetBody,
+    [`assets/${assetName}.gz`]: gzipSync(Buffer.from(assetBody), { level: 9 }),
+  }),
+);
 const surface = createServer((req, res) => void handler(req, res));
 await new Promise<void>((r) => surface.listen(0, r));
 const base = `http://localhost:${(surface.address() as AddressInfo).port}`;
@@ -51,8 +50,6 @@ const base = `http://localhost:${(surface.address() as AddressInfo).port}`;
 test.after(() => {
   surface.close();
   core.close();
-  rmSync(assetPath, { force: true });
-  rmSync(`${assetPath}.gz`, { force: true });
 });
 
 function identityHeaders(): Record<string, string> {
@@ -77,19 +74,19 @@ function get(path: string, headers: Record<string, string>): Promise<RawResponse
   });
 }
 
-test("the session list is gzipped for a gzip-capable client and decodes to the identical bytes", async () => {
-  const packed = await get("/api/sessions", { ...identityHeaders(), "accept-encoding": "gzip" });
+test("a relayed core read is gzipped for a gzip-capable client and decodes to the identical bytes", async () => {
+  const packed = await get("/api/composio/slack", { ...identityHeaders(), "accept-encoding": "gzip" });
   assert.equal(packed.status, 200);
   assert.equal(packed.headers["content-encoding"], "gzip");
   assert.equal(packed.headers["vary"], "accept-encoding");
-  assert.ok(packed.body.length < sessionsPayload.length / 4, `expected real compression, got ${packed.body.length}`);
-  assert.equal(gunzipSync(packed.body).toString("utf8"), sessionsPayload);
+  assert.ok(packed.body.length < relayedPayload.length / 4, `expected real compression, got ${packed.body.length}`);
+  assert.equal(gunzipSync(packed.body).toString("utf8"), relayedPayload);
 });
 
-test("the session list is byte-identical and uncompressed without accept-encoding", async () => {
-  const plain = await get("/api/sessions", identityHeaders());
+test("a relayed core read is byte-identical and uncompressed without accept-encoding", async () => {
+  const plain = await get("/api/composio/slack", identityHeaders());
   assert.equal(plain.headers["content-encoding"], undefined);
-  assert.equal(plain.body.toString("utf8"), sessionsPayload);
+  assert.equal(plain.body.toString("utf8"), relayedPayload);
 });
 
 test("a static asset is served from its precompressed sibling, byte-identical once decoded", async () => {

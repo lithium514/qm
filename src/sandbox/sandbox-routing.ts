@@ -1,8 +1,9 @@
 import type { SandboxResources } from "./sandbox-resources.ts";
-import type { WorkspaceLayer } from "../types.ts";
+import type { ScopeId } from "../types.ts";
 import { swallow, swallowAs } from "../util/errors.ts";
 import {
   CapabilityUnsupportedError,
+  removeDirAndList,
   SandboxProvisionCleanupError,
   supportsBlobStaging,
   supportsProcessSessions,
@@ -71,7 +72,12 @@ export function createSandboxRouter(opts: RoutingSandboxOptions): Sandbox {
   async function computerTarget(scopeId: string) {
     const resource = await resources.resolve(scopeId);
     if (!resource) throw new NoDefaultSandboxError();
-    return { sandbox: backendFor(resource.backend), scopeId: resource.backingScopeId, resourceId: resource.id };
+    return {
+      sandbox: backendFor(resource.backend),
+      scopeId: resource.backingScopeId,
+      resourceId: resource.id,
+      memoryGb: resource.memoryGb,
+    };
   }
 
   const reportedGaps = new Set<string>();
@@ -110,29 +116,26 @@ export function createSandboxRouter(opts: RoutingSandboxOptions): Sandbox {
       return resource ? backendFor(resource.backend).profile : fallback.profile;
     },
 
-    async provision(layers: WorkspaceLayer[], provOpts?: ProvisionOptions): Promise<SandboxHandle> {
-      const scope = provOpts?.routeScopeId ?? writableScope(layers);
+    async provision(scope: ScopeId, provOpts?: ProvisionOptions): Promise<SandboxHandle> {
       const resource =
         provOpts?.sandboxId !== undefined ? await resources.get(provOpts.sandboxId) : await resources.resolve(scope);
       const backend = resource?.backend ?? defaultBackend;
       const sandbox = backendFor(backend);
-      const provision = async (targetLayers: WorkspaceLayer[]) => {
+      const provision = async (target: ScopeId, options = provOpts) => {
         try {
-          return await sandbox.provision(targetLayers, provOpts);
+          return await sandbox.provision(target, options);
         } catch (error) {
           if (error instanceof SandboxProvisionCleanupError) error.handle.backend = backend;
           throw error;
         }
       };
       if (provOpts?.scratch) {
-        const handle = await provision(layers);
+        const handle = await provision(scope);
         return { ...handle, backend, scopeId: scope };
       }
       if (!resource) throw new NoDefaultSandboxError();
-      const routedLayers = layers.map((layer) =>
-        layer.mode === "rw" ? { ...layer, scopeId: resource.backingScopeId } : layer,
-      );
-      const handle = await resources.use(resource.id, () => provision(routedLayers));
+      const sized = resource.memoryGb ? { ...provOpts, memoryGb: resource.memoryGb } : provOpts;
+      const handle = await resources.use(resource.id, () => provision(resource.backingScopeId, sized));
       return { ...handle, backend: resource.backend, scopeId: resource.ownerScopeId, resourceId: resource.id };
     },
 
@@ -162,14 +165,7 @@ export function createSandboxRouter(opts: RoutingSandboxOptions): Sandbox {
       return useHandle(handle, remove);
     },
     removeDirAndList(handle, removeRelDir, listRelDir) {
-      return useHandle(handle, async () => {
-        const sandbox = forHandle(handle);
-        if (sandbox.removeDirAndList) return sandbox.removeDirAndList(handle, removeRelDir, listRelDir);
-        await sandbox.removeDir(handle, removeRelDir);
-        return sandbox
-          .listDir(handle, listRelDir)
-          .catch(swallowAs(`sandbox-routing: list ${listRelDir}`, [] as string[]));
-      });
+      return useHandle(handle, () => removeDirAndList(forHandle(handle), handle, removeRelDir, listRelDir));
     },
     teardown(handle, tdOpts?: TeardownOptions): Promise<void> {
       const action = () => forHandle(handle).teardown(handle, tdOpts);
@@ -250,7 +246,8 @@ export function createSandboxRouter(opts: RoutingSandboxOptions): Sandbox {
       ? {
           restartComputer: async (scopeId: string) => {
             const target = await computerTarget(scopeId);
-            const action = () => requireCap(target.sandbox, "restartComputer", scopeId).restartComputer(target.scopeId);
+            const action = () =>
+              requireCap(target.sandbox, "restartComputer", scopeId).restartComputer(target.scopeId, target.memoryGb);
             return resources.use(target.resourceId, action, true);
           },
         }
@@ -287,9 +284,6 @@ export function createSandboxRouter(opts: RoutingSandboxOptions): Sandbox {
 
   return router;
 }
-
-const writableScope = (layers: WorkspaceLayer[]): string =>
-  (layers.find((l) => l.mode === "rw") ?? layers[0])?.scopeId ?? "default";
 
 const swallowReap = swallowAs("sandbox-router: reapDeepIdle on a backend", { reaped: 0 });
 

@@ -1,7 +1,5 @@
 import { cleanupFailedProvision } from "./sandbox.ts";
 import { randomUUID } from "node:crypto";
-import type { WorkspaceLayer } from "../types.ts";
-import type { WorkspaceStore } from "../workspace/workspace-store.ts";
 import type { AdvisoryLock } from "../persistence/advisory-lock.ts";
 import type { DurableMap } from "../persistence/durable-map.ts";
 import { orgId as configOrgId } from "../config.ts";
@@ -10,7 +8,6 @@ import { swallowAs, errMessage } from "../util/errors.ts";
 import { shq } from "../util/shell.ts";
 import { nonInteractiveShellPrefix, DROPPED_PROXY_ENV, forceThroughProxyEnv } from "./sandbox-env.ts";
 import { createExecProcessSessions, type ExecProcessIo } from "./exec-process-session.ts";
-import { materializeRoLayers } from "./ro-layers.ts";
 import { withConnectorSdk, type ConnectorSdkBundle } from "./connector-sdk.ts";
 import { createLayerToolInstaller } from "./layer-tool-install.ts";
 import type { LayerInstallFile } from "../deployment/load-layer.ts";
@@ -50,8 +47,6 @@ import type {
 
 const HOME_DIR = "/root";
 const WORKSPACE_BASENAME = "workspace";
-const RO_LAYERS_TAR = ".ro-layers.tar";
-const RO_LAYERS_MANIFEST = ".ro-layers.manifest";
 const HOME_TAR = `${HOME_DIR}/.qm-home.tar`;
 const HYDRATED_MARKER = `${HOME_DIR}/.qm-hydrated`;
 const ACTIVITY_TOUCH_INTERVAL_MS = 10 * 60_000;
@@ -99,7 +94,7 @@ export interface ModalSandboxOptions extends BlobStagingOptions {
   onError?: (e: { category: string; code: string; message: string; scopeLabel?: string }) => void;
 }
 
-export function createModalSandbox(workspace: WorkspaceStore, opts: ModalSandboxOptions): Sandbox {
+export function createModalSandbox(opts: ModalSandboxOptions): Sandbox {
   const client = opts.client;
   const prefix = opts.namePrefix ?? "qm";
   const defaultTimeoutSec = opts.defaultTimeoutSec ?? 600;
@@ -129,6 +124,7 @@ export function createModalSandbox(workspace: WorkspaceStore, opts: ModalSandbox
 
   const sessionByName = new Map<string, ModalSession>();
   const scopeByName = new Map<string, string>();
+  const sizeByScope = new Map<string, number>();
   const scratchKeyByName = new Map<string, string>();
   const activeScratch = new Map<string, number>();
 
@@ -213,7 +209,7 @@ export function createModalSandbox(workspace: WorkspaceStore, opts: ModalSandbox
     }
     let session: ModalSession;
     try {
-      session = await client.create({ name, tags: tags("scope") });
+      session = await client.create({ name, tags: tags("scope"), memoryGb: sizeByScope.get(scope) });
     } catch (err) {
       if (!(err instanceof ModalNameConflictError)) throw err;
       const adopted = await client.fromName(name);
@@ -459,6 +455,7 @@ export function createModalSandbox(workspace: WorkspaceStore, opts: ModalSandbox
   const profile: AgentComputerProfile = {
     backend: "modal",
     writablePersistence: "provider_managed",
+    sizesMemory: true,
     processSessions: true,
     egressEnforcement: opts.egressProxyUrl ? "domain" : "none",
     spec: {
@@ -675,10 +672,8 @@ export function createModalSandbox(workspace: WorkspaceStore, opts: ModalSandbox
     ...execFileOps,
     ...blobStaging,
 
-    async provision(layers: WorkspaceLayer[], provOpts?: ProvisionOptions): Promise<SandboxHandle> {
+    async provision(scope: string, provOpts?: ProvisionOptions): Promise<SandboxHandle> {
       const scratch = provOpts?.scratch;
-      const writable = layers.find((l) => l.mode === "rw") ?? layers[0];
-      const scope = writable?.scopeId ?? "default";
       let name: string;
       let coldStart: boolean;
       if (scratch) {
@@ -686,6 +681,8 @@ export function createModalSandbox(workspace: WorkspaceStore, opts: ModalSandbox
       } else {
         name = sandboxScopeName(prefix, scope);
         scopeByName.set(name, scope);
+        if (provOpts?.memoryGb) sizeByScope.set(scope, provOpts.memoryGb);
+        else sizeByScope.delete(scope);
         ({ coldStart } = await ensureSession(scope, name, provOpts?.onStatus));
       }
 
@@ -711,18 +708,6 @@ export function createModalSandbox(workspace: WorkspaceStore, opts: ModalSandbox
             writeAbs: (abs, data) => writeAbsBytes(name, abs, data),
           },
           `mkdir -p ${shq(workspaceDir)}${credLinks}`,
-        );
-
-        await materializeRoLayers(
-          workspace,
-          layers,
-          handle,
-          {
-            readFile: (h, rel) => sandbox.readFile(h, rel),
-            writeFileBytes: (h, rel, data) => sandbox.writeFileBytes(h, rel, data),
-            exec: (script, t) => execRaw(name, script, t),
-          },
-          { manifest: RO_LAYERS_MANIFEST, tar: RO_LAYERS_TAR, label: "modal" },
         );
 
         return handle;
@@ -781,7 +766,7 @@ export function createModalSandbox(workspace: WorkspaceStore, opts: ModalSandbox
         }
       : {}),
 
-    async restartComputer(scopeId: string): Promise<void> {
+    async restartComputer(scopeId: string, memoryGb?: number): Promise<void> {
       await provisionQueue(scopeId, async () => {
         const stored = await store.get(scopeId);
         if (!stored) return;
@@ -793,12 +778,27 @@ export function createModalSandbox(workspace: WorkspaceStore, opts: ModalSandbox
           if (!(error instanceof ModalSandboxGoneError)) throw error;
         }
         if (session) {
-          if (!stored.hydrationPending) await snapshotHome(scopeId, session);
-          await session.terminate();
+          if (!stored.hydrationPending)
+            await snapshotHome(scopeId, session).catch((error: unknown) => {
+              if (!(error instanceof ModalSandboxGoneError)) throw error;
+            });
+          await session.terminate().catch((error: unknown) => {
+            if (!(error instanceof ModalSandboxGoneError)) throw error;
+          });
         }
         sessionByName.delete(name);
         await store.merge(scopeId, { hydrationPending: false, recoveryError: undefined });
       });
+      if (memoryGb === undefined) return;
+      const previous = sizeByScope.get(scopeId);
+      sizeByScope.set(scopeId, memoryGb);
+      try {
+        await ensureSession(scopeId, sandboxScopeName(prefix, scopeId));
+      } catch (error) {
+        if (previous === undefined) sizeByScope.delete(scopeId);
+        else sizeByScope.set(scopeId, previous);
+        throw error;
+      }
     },
 
     async computerStatus(scopeId: string): Promise<ComputerStatus> {

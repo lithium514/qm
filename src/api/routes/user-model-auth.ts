@@ -168,14 +168,27 @@ async function claudeComplete(ctx: ApiCtx): Promise<void> {
 }
 
 export const userModelAuthRoutes: ReadonlyArray<Route<ApiCtx>> = [
-  { method: "GET", path: "/v1/user-model-auth/status", actor: "query.principalId", auth: "source", handle: getStatus },
+  {
+    method: "GET",
+    path: "/v1/user-model-auth/status",
+    browser: true,
+    actor: "query.principalId",
+    auth: "source",
+    handle: getStatus,
+  },
   ...withActor("body.principalId", [
-    { method: "POST", path: "/v1/user-model-auth/account", auth: "source", handle: setAccount },
-    { method: "POST", path: "/v1/user-model-auth/api-key", auth: "source", handle: putApiKey },
-    { method: "POST", path: "/v1/user-model-auth/disconnect", auth: "source", handle: disconnect },
-    { method: "POST", path: "/v1/user-model-auth/chatgpt/start", auth: "source", handle: chatgptStart },
-    { method: "POST", path: "/v1/user-model-auth/chatgpt/poll", auth: "source", handle: chatgptPoll },
-    { method: "POST", path: "/v1/user-model-auth/claude/start", auth: "source", handle: claudeStart },
-    { method: "POST", path: "/v1/user-model-auth/claude/complete", auth: "source", handle: claudeComplete },
+    { method: "POST", path: "/v1/user-model-auth/account", browser: true, auth: "source", handle: setAccount },
+    { method: "POST", path: "/v1/user-model-auth/api-key", browser: true, auth: "source", handle: putApiKey },
+    { method: "POST", path: "/v1/user-model-auth/disconnect", browser: true, auth: "source", handle: disconnect },
+    { method: "POST", path: "/v1/user-model-auth/chatgpt/start", browser: true, auth: "source", handle: chatgptStart },
+    { method: "POST", path: "/v1/user-model-auth/chatgpt/poll", browser: true, auth: "source", handle: chatgptPoll },
+    { method: "POST", path: "/v1/user-model-auth/claude/start", browser: true, auth: "source", handle: claudeStart },
+    {
+      method: "POST",
+      path: "/v1/user-model-auth/claude/complete",
+      browser: true,
+      auth: "source",
+      handle: claudeComplete,
+    },
   ]),
 ];

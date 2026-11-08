@@ -6,6 +6,7 @@ export interface DirectoryMember {
   type: PrincipalType;
   slackId?: string;
   avatarUrl?: string;
+  isBot?: boolean;
 }
 
 export interface DirectoryChannel {
@@ -63,6 +64,7 @@ export interface DirectoryStore {
   channelMembership(channelId: string, principalId: string): Promise<boolean | undefined>;
   channelMemberIds(channelId: string): Promise<string[] | undefined>;
   channelPrivacy(channelId: string): Promise<boolean | undefined>;
+  rosterCoversAudience(channelId: string): Promise<boolean | undefined>;
   replaceGroups(
     groupMembers: GroupMembership[],
     syncedAt?: number,
@@ -75,6 +77,7 @@ export interface DirectoryStore {
   groupMembership(groupId: string, principalId: string): Promise<boolean | undefined>;
   listGroupsFor(principalId: string): Promise<string[]>;
   conversationMembers(kind: "channel" | "group", id: string): Promise<DirectoryMember[] | undefined>;
+  groupRosters(groupIds: readonly string[]): Promise<Map<string, DirectoryMember[]>>;
   listChannelsFor(principalId: string): Promise<DirectoryChannel[]>;
   setWorkspaceUrl(url: string): Promise<void>;
   meta(): Promise<DirectoryMeta>;

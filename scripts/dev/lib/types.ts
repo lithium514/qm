@@ -12,13 +12,11 @@ export const EXIT = {
   doctorCritical: 10,
 } as const;
 
-export type ChildName = "core" | "web" | "admin" | "portal";
-export const CHILD_ORDER: ChildName[] = ["core", "web", "portal"];
+export type ChildName = "core";
+export const CHILD_ORDER: ChildName[] = ["core"];
 
 export interface SlotPorts {
   core: number;
-  web: number;
-  admin: number;
   portal: number;
   prodProxy: number;
   slackHealth: number;
@@ -103,7 +101,7 @@ export interface StatusReport {
 }
 
 export type DevSandboxBackend =
-  "local" | "sprites" | "smolmachines" | "e2b" | "porter" | "agent37" | "superserve" | "do-managed-agents";
+  "local" | "sprites" | "smolmachines" | "e2b" | "porter" | "agent37" | "superserve" | "do-managed-agents" | "render";
 export type DevSandboxChoice = DevSandboxBackend | "auto";
 
 export interface BootSpec {

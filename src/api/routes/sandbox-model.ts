@@ -1,12 +1,10 @@
-import { createHmac } from "node:crypto";
-import { Readable } from "node:stream";
-import type { ReadableStream as WebReadableStream } from "node:stream/web";
 import { SANDBOX_MODEL_AUD } from "../../auth/capability-token.ts";
-import { gatewayRoot } from "../../model/provider-endpoints.ts";
+import { gatewayActorId, gatewayRoot, modelGatewayHeaders } from "../../model/provider-endpoints.ts";
 import { createExactSecretValueMasker } from "../../security/secret-masking.ts";
 import { reportFailure } from "../../util/errors.ts";
 import { SANDBOX_MODEL_PREFIX } from "../contract.ts";
-import { pipeToResponse, sendJson } from "../http.ts";
+import { sendJson } from "../http.ts";
+import { relayStream } from "../../../plugins/chassis/src/http.ts";
 import type { ApiCtx, Route } from "./route.ts";
 
 const FORWARDED_HEADERS = ["accept", "content-type", "anthropic-version", "anthropic-beta"];
@@ -14,10 +12,6 @@ const UPSTREAM_REQUEST_LIMIT_BYTES = 32 * 1024 * 1024;
 
 function redactGatewayKey(apiKey: string): (text: string) => string {
   return createExactSecretValueMasker([apiKey, apiKey.slice(apiKey.lastIndexOf(" ") + 1)]);
-}
-
-function endUser(actorId: string, secret: string): string {
-  return createHmac("sha256", secret).update(actorId).digest("hex").slice(0, 32);
 }
 
 function attributed(path: string, input: Record<string, unknown>, user: string): Record<string, unknown> {
@@ -34,7 +28,7 @@ async function denied(ctx: ApiCtx): Promise<boolean> {
     sendJson(res, 403, { error: { message: "sandbox model grant required" } });
     return true;
   }
-  if (!deps.modelGatewayTransport) {
+  if (!deps.modelGatewayTransport?.actorKey) {
     sendJson(res, 503, { error: { message: "no model gateway is configured" } });
     return true;
   }
@@ -55,7 +49,7 @@ async function denied(ctx: ApiCtx): Promise<boolean> {
 
 async function proxy(ctx: ApiCtx): Promise<void> {
   if (await denied(ctx)) return;
-  const { deps, body, req, res, capability, secret, url, pathname, method } = ctx;
+  const { deps, body, req, res, capability, url, pathname, method } = ctx;
   const gateway = deps.modelGatewayTransport!;
   const path = pathname.slice(SANDBOX_MODEL_PREFIX.length);
   await gateway.refresh?.();
@@ -67,7 +61,7 @@ async function proxy(ctx: ApiCtx): Promise<void> {
   let payload = body;
   if (body && typeof body === "object" && !Array.isArray(body)) {
     const input = body as Record<string, unknown>;
-    const user = endUser(capability!.actorId, deps.capabilitySecret ?? secret ?? "");
+    const user = gatewayActorId(capability!.actorId, gateway.actorKey!);
     if (!Object.hasOwn(input, "model")) payload = attributed(path, input, user);
     else {
       const target =
@@ -85,7 +79,7 @@ async function proxy(ctx: ApiCtx): Promise<void> {
   }
   const headers: Record<string, string> = {
     "content-type": "application/json",
-    [gateway.apiKeyHeader]: gateway.apiKey,
+    ...modelGatewayHeaders(gateway, "sandbox"),
   };
   for (const name of FORWARDED_HEADERS) {
     const value = req.headers[name];
@@ -115,11 +109,11 @@ async function proxy(ctx: ApiCtx): Promise<void> {
       return void res.end(text);
     }
     res.writeHead(response.status, { "content-type": contentType, "cache-control": "no-store" });
-    const upstream = Readable.fromWeb(response.body as WebReadableStream);
-    upstream.on("error", (error) => {
-      if (!controller.signal.aborted) reportFailure("sandbox model: gateway stream", error, path);
+    relayStream(response.body, res, {
+      onError: (error) => {
+        if (!controller.signal.aborted) reportFailure("sandbox model: gateway stream", error, path);
+      },
     });
-    pipeToResponse(res, upstream, "model stream failed");
   } catch (error) {
     if (!controller.signal.aborted) reportFailure("sandbox model: gateway request", error, path);
     if (!res.headersSent)

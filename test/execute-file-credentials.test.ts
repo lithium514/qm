@@ -79,7 +79,8 @@ async function fixture(t: TestContext) {
       sandbox,
       provision: async () => handle,
       provisionScratch: async () => ({ ...handle, id: "scratch" }),
-      layers: [{ scopeId: scope, mountPath: "", mode: "rw" }],
+      writableScopeId: scope,
+      readOnlyScopeIds: [],
       commandPolicy: () => ({ mode: "denylist", rules: [] }),
       authorizeCommand: () => false,
       commandCredentials: [
@@ -95,8 +96,9 @@ async function fixture(t: TestContext) {
               env: [],
               files: {
                 files: materialized.files,
-                save: (updated: CredentialFile[]) => keychain.updateFiles(materialized, updated),
-                source: { credentialId: materialized.credentialId, ownerId: owner, service: "aws" },
+                save: (updated: CredentialFile[]) =>
+                  keychain.updateFiles({ ...materialized, writeback: true }, updated),
+                source: { credentialId: materialized.credentialId, ownerId: owner, service: "aws", writeback: true },
               },
             };
           },
@@ -109,7 +111,6 @@ async function fixture(t: TestContext) {
         },
       ],
       grantedHandles: [],
-      workspace: {} as never,
       deploy: {} as never,
       acl: {} as never,
       createdBy: owner,
@@ -176,6 +177,33 @@ test("failed commands still persist refreshes", async (t) => {
   assert.equal(second.stdout, "refreshed");
 });
 
+test("large files written elsewhere in the temporary home neither block nor join the refresh", async (t) => {
+  const f = await fixture(t);
+  const result = await f
+    .context()
+    .execute(
+      'mkdir -p "$HOME/.cache/tool" && head -c 12000000 /dev/zero > "$HOME/.cache/tool/bin" && ' +
+        'printf refreshed > "$HOME/.aws/sso/cache/session.json" && printf done',
+      { credentials: ["aws"] },
+    );
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout, "done");
+  const next = await f.keychain.materializeOwnById(owner, f.credential.id, scope);
+  if (next.kind !== "file") throw new Error("Expected files");
+  assert.deepEqual(
+    next.files.map((file) => [file.path, Buffer.from(file.contentBase64, "base64").toString()]),
+    [[".aws/sso/cache/session.json", "refreshed"]],
+  );
+});
+
+test("credential files that grow past the limit fail with the reason", async (t) => {
+  const f = await fixture(t);
+  await assert.rejects(
+    f.context().execute('head -c 12000000 /dev/zero > "$HOME/.aws/sso/cache/session.json"', { credentials: ["aws"] }),
+    /credential files archive is \d+ bytes, over the \d+-byte cap/,
+  );
+});
+
 test("concurrent file updates cannot overwrite a newer credential or its grants", async (t) => {
   const f = await fixture(t);
   const grant = await f.keychain.createGrant({
@@ -188,8 +216,8 @@ test("concurrent file updates cannot overwrite a newer credential or its grants"
   const a = await f.keychain.materializeOwnById(owner, f.credential.id, scope);
   const b = await f.keychain.materializeOwnById(owner, f.credential.id, scope);
   if (a.kind !== "file" || b.kind !== "file") throw new Error("Expected files");
-  await f.keychain.updateFiles(a, files("newer"));
-  await assert.rejects(f.keychain.updateFiles(b, files("stale")), /changed during execution/);
+  await f.keychain.updateFiles({ ...a, writeback: true }, files("newer"));
+  await assert.rejects(f.keychain.updateFiles({ ...b, writeback: true }, files("stale")), /changed during execution/);
   assert.equal((await f.keychain.getGrant(grant.id))?.status, "active");
 });
 

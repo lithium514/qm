@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { gatewayActorId } from "../../../model/provider-endpoints.ts";
 import { mintSignedPayload } from "../../../auth/signed-token.ts";
 import { scopeId as makeScopeId } from "../../../types.ts";
 import { adminStatusFromGrants, AdminError } from "../../../admin/admin-service.ts";
-import { personKey, samePerson } from "../../../directory/person.ts";
+import { foldPrincipalId, personKey, samePerson } from "../../../directory/person.ts";
 import type { AdminRole } from "../../../admin/admin-grant-store.ts";
 import type { DirectoryMember } from "../../../directory/directory-store.ts";
 import { computeUsers } from "../../../admin/users.ts";
@@ -31,10 +32,11 @@ export async function listUsers(ctx: ApiCtx): Promise<void> {
   const actor = await authorizeAdmin(ctx, scope);
   if (!actor) return;
   audit(deps, { principalId: actor.id, action: "users.read", resource: "users", scopeLabel: scope });
-  const participants = (await deps.sessions?.listParticipants()) ?? [];
-  const turns = (await deps.sessions?.attributedTurns()) ?? [];
-  const grants = (await deps.admin?.listGrants()) ?? [];
-  const users = computeUsers({ participants, turns, grants });
+  const [roster, activity, grants] = await Promise.all([
+    deps.admin!.users.list(),
+    deps.admin!.users.activity(),
+    deps.admin?.listGrants() ?? [],
+  ]);
   const now = Date.now();
   const externalUsers = ((await deps.identity?.listExternalMembers()) ?? [])
     .map((m) => ({ ...m, status: externalMemberActive(m, now) ? ("active" as const) : ("expired" as const) }))
@@ -43,25 +45,22 @@ export async function listUsers(ctx: ApiCtx): Promise<void> {
         Number(b.status === "active") - Number(a.status === "active") ||
         (a.expiresAt ?? Infinity) - (b.expiresAt ?? Infinity),
     );
-  for (const member of externalUsers.filter((m) => m.kind === "teammate" && m.status === "active")) {
-    if (!users.some((u) => samePerson(u.principalId, member.email)))
-      users.push({
-        principalId: member.email,
-        sessionCount: 0,
-        turnCount: 0,
-        lastSeenAt: null,
-        admin: adminStatusFromGrants(grants, member.email),
-      });
-  }
+  const rows = computeUsers({ roster, activity, grants }).map((u) => ({
+    ...u,
+    deactivated: deps.identity?.deactivationSource(u.principalId) !== undefined,
+  }));
   const signInUrl = signInUrlOf(deps);
   const inviteEmail = {
     configured: deps.inviteMailer !== undefined,
     ...(deps.inviteMailer ? {} : { problem: INVITE_EMAIL_NOT_CONFIGURED }),
     ...(signInUrl ? { signInUrl } : {}),
   };
+  const actorKey = deps.modelGatewayTransport?.actorKey;
   return sendJson(res, 200, {
     scopeId: scope,
-    users,
+    users: actorKey
+      ? rows.map((user) => ({ ...user, gatewayActor: gatewayActorId(user.principalId, actorKey) }))
+      : rows,
     grants,
     externalUsers,
     inviteEmail,
@@ -169,6 +168,7 @@ async function inviteUser(ctx: ApiCtx, teammate: boolean): Promise<void> {
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
   };
+  if (member.kind === "teammate") await deps.admin!.users.record({ id: email, source: "invite", at: member.createdAt });
   await deps.identity.putExternalMember(member);
   const action = created || readmitted ? "external_user.invite" : "external_user.update";
   audit(deps, {
@@ -301,8 +301,9 @@ export async function listKeychainStatus(ctx: ApiCtx): Promise<void> {
   if (!deps.keychain)
     return sendJson(res, 200, { scopeId: scope, people: [], credentials: [], grants: [], asks: [], enabled: false });
 
-  const principalId = ctx.url.searchParams.get("principal")?.trim();
-  if (principalId) {
+  const requested = ctx.url.searchParams.get("principal")?.trim();
+  if (requested) {
+    const { principalId } = await resolveAdminUser(deps, requested);
     const [credentials, grants] = await Promise.all([
       deps.keychain.listByOwner(principalId),
       deps.keychain.listGrants({ ownerId: principalId }),
@@ -321,50 +322,62 @@ export async function listKeychainStatus(ctx: ApiCtx): Promise<void> {
     });
   }
 
-  const [credentials, grants, asks, participantIds, adminGrants] = await Promise.all([
+  const [credentials, grants, asks, roster, adminGrants] = await Promise.all([
     deps.keychain.listAllMetadata(),
     deps.keychain.listGrants({}),
     deps.keychain.listAsks({}),
-    deps.sessions?.distinctParticipants() ?? Promise.resolve([]),
+    deps.admin!.users.list(),
     deps.admin?.listGrants() ?? Promise.resolve([]),
   ]);
-  const ids = new Set<string>([
+  const ids = [
+    ...roster.map((u) => u.principalId),
     ...credentials.map((c) => c.ownerId),
     ...grants.map((g) => g.ownerId),
     ...grants.map((g) => g.usedBy).filter((id): id is string => !!id),
     ...asks.map((a) => a.ownerId),
     ...asks.map((a) => a.requesterId),
-    ...participantIds,
     ...adminGrants.map((g) => g.principalId),
-  ]);
-
+  ];
   const members = await app.directoryMembers();
-  const namesByKey = new Map(members.map((m) => [personKey(m.principalId), m.displayName]));
-  const rosterIdByKey = new Map(members.map((m) => [personKey(m.principalId), m.principalId]));
-  const idByKey = new Map<string, string>();
+  const users = await deps.admin!.users.resolve([...ids, ...members.map((m) => m.principalId)]);
+  const keyOf = (id: string) => users.get(id)?.id ?? foldPrincipalId(id);
+  const byKey = new Map<string, { userId: string | null; principalId: string }>();
   for (const id of ids) {
-    const key = personKey(id);
-    if (!idByKey.has(key)) idByKey.set(key, rosterIdByKey.get(key) ?? id);
+    const key = keyOf(id);
+    if (!key || byKey.has(key)) continue;
+    const user = users.get(id);
+    byKey.set(key, { userId: user?.id ?? null, principalId: user?.principalId ?? foldPrincipalId(id) });
   }
-  const people = [...idByKey.values()].sort().map((principalId) => ({
-    principalId,
-    displayName: namesByKey.get(personKey(principalId)) ?? null,
-    credentialCount: credentials.filter((c) => samePerson(c.ownerId, principalId)).length,
-    activeGrantCount: grants.filter(
-      (g) =>
-        samePerson(g.ownerId, principalId) &&
-        g.status === "active" &&
-        (g.expiresAt === undefined || g.expiresAt > Date.now()),
-    ).length,
-    pendingAskCount: asks.filter((a) => samePerson(a.ownerId, principalId) && a.status === "pending").length,
-  }));
+  const nameOf = new Map<string, DirectoryMember>();
+  for (const m of members) {
+    const key = keyOf(m.principalId);
+    if (!nameOf.has(key) || foldPrincipalId(m.principalId) === users.get(m.principalId)?.principalId)
+      nameOf.set(key, m);
+  }
+  const now = Date.now();
+  const people = [...byKey]
+    .map(([key, { userId, principalId }]) => {
+      const member = nameOf.get(key);
+      return {
+        userId,
+        principalId: member && foldPrincipalId(member.principalId) === principalId ? member.principalId : principalId,
+        displayName: member?.displayName ?? null,
+        credentialCount: credentials.filter((c) => keyOf(c.ownerId) === key).length,
+        activeGrantCount: grants.filter(
+          (g) => keyOf(g.ownerId) === key && g.status === "active" && (g.expiresAt === undefined || g.expiresAt > now),
+        ).length,
+        pendingAskCount: asks.filter((a) => keyOf(a.ownerId) === key && a.status === "pending").length,
+      };
+    })
+    .sort((a, b) => Number(a.principalId > b.principalId) - Number(a.principalId < b.principalId));
 
   return sendJson(res, 200, { scopeId: scope, people, credentials, grants, asks, enabled: true });
 }
 
-async function resolveAdminUser(deps: ApiCtx["deps"], requestedPrincipal: string) {
-  const member = await deps.directory?.get(requestedPrincipal);
-  return { member, principalId: member?.principalId ?? personKey(requestedPrincipal) };
+export async function resolveAdminUser(deps: ApiCtx["deps"], requested: string) {
+  const user = (await deps.admin?.users.get(requested)) ?? null;
+  const member = await deps.directory?.get(user?.principalId ?? requested);
+  return { member, user, principalId: member?.principalId ?? user?.principalId ?? personKey(requested) };
 }
 
 export async function getUserDetail(ctx: ApiCtx): Promise<void> {
@@ -372,7 +385,7 @@ export async function getUserDetail(ctx: ApiCtx): Promise<void> {
   const org = orgScope(deps);
   const actor = await authorizeAdmin(ctx, org);
   if (!actor) return;
-  const { member, principalId } = await resolveAdminUser(deps, params.principalId!);
+  const { member, user, principalId } = await resolveAdminUser(deps, params.principalId!);
   const personal = makeScopeId("personal", principalId);
   audit(deps, { principalId: actor.id, action: "user.read", resource: principalId, scopeLabel: org });
 
@@ -394,10 +407,13 @@ export async function getUserDetail(ctx: ApiCtx): Promise<void> {
     : null;
 
   return sendJson(res, 200, {
+    userId: user?.id ?? null,
     principalId,
     scopeId: personal,
     ...(member?.displayName ? { displayName: member.displayName } : {}),
     admin: adminStatusFromGrants(grants, principalId),
+    deactivated: deps.identity?.deactivationSource(principalId) !== undefined,
+    user,
     stats: { sessions: stats ?? 0 },
     config,
     onboarding,

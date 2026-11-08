@@ -2,6 +2,7 @@ import { promisify } from "node:util";
 import { deflateRaw, inflateRaw } from "node:zlib";
 import { orgId as configOrgId } from "../config.ts";
 import type { CandidateDestination, Destination, EgressPolicy, Principal, ScopeId } from "../types.ts";
+import type { SessionOrigin } from "../sessions/session-store.ts";
 import { mintSignedPayload, verifySignedPayload } from "./signed-token.ts";
 
 export const CAPABILITY_TTL_MS = 60 * 60_000;
@@ -63,11 +64,13 @@ export interface CapabilityClaims {
   liveActor?: boolean;
   runId?: string;
   sessionId?: string;
+  origin?: SessionOrigin;
   runAttempt?: number;
   runLeaseToken?: string;
   deployment?: string;
   botActor?: boolean;
   liveAuthor?: boolean;
+  actAsActor?: boolean;
   triggered?: boolean;
   grants?: string[];
   threadRef?: string;
@@ -155,6 +158,7 @@ export async function verifyCapabilityToken(
   if (claims.liveActor !== undefined && typeof claims.liveActor !== "boolean") return null;
   if (claims.botActor !== undefined && typeof claims.botActor !== "boolean") return null;
   if (claims.liveAuthor !== undefined && typeof claims.liveAuthor !== "boolean") return null;
+  if (claims.actAsActor !== undefined && typeof claims.actAsActor !== "boolean") return null;
   if (claims.blob !== undefined && claims.blob?.dir !== "read" && claims.blob?.dir !== "write") return null;
   if (claims.drop !== undefined && typeof claims.drop !== "string") return null;
   if (claims.runId !== undefined && typeof claims.runId !== "string") return null;

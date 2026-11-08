@@ -4,7 +4,6 @@ import { computeRetention } from "../../../admin/retention.ts";
 import {
   FAST_MODE_MODEL_IDS,
   modelCatalogFor,
-  selectableBaseModels,
   embeddingModelCatalog,
   defaultModel,
   modelServiceable,
@@ -20,12 +19,7 @@ import {
 } from "../../../model/model-catalog.ts";
 import { sendJson } from "../../http.ts";
 import { activePrincipal, adminActorFrom, audit, authorizeAdmin, orgScope } from "../shared.ts";
-import {
-  ADMIN_RESOURCES,
-  ADMIN_RESOURCE_BY_ID,
-  adminResourceManifest,
-  defaultAutoFlaggerConfig,
-} from "../admin-resources.ts";
+import { ADMIN_RESOURCES, ADMIN_RESOURCE_BY_ID, adminResourceManifest } from "../admin-resources.ts";
 import { type ApiCtx } from "../route.ts";
 import {
   composePolicy,
@@ -242,7 +236,6 @@ const SETTINGS_RESOURCES = {
     "runtime",
     "securityPosture",
     "sharingPosture",
-    "autoFlagger",
     "approvalGrantModes",
     "commandPolicy",
     "ambientPolicy",
@@ -261,7 +254,6 @@ const SETTINGS_RESOURCES = {
     "interactiveFastMode",
     "individualModelAuth",
     "memoryEmbeddingModel",
-    "browseModel",
     "browseMaxSteps",
   ],
   credentials: [],
@@ -274,11 +266,10 @@ type SettingsView = keyof typeof SETTINGS_RESOURCES;
 async function scopeServiceCredentials(deps: ApiCtx["deps"], targetScope: string) {
   const [credentials, grants] = await Promise.all([
     deps.serviceCreds?.listServiceCredentials(targetScope) ?? [],
-    deps.acl?.list() ?? [],
+    deps.acl?.find({ ownerScopeId: targetScope, kind: "service-cred" }) ?? [],
   ]);
   const grantees = new Map<string, string[]>();
   for (const grant of grants) {
-    if (grant.ownerScopeId !== targetScope) continue;
     const scopes = grantees.get(grant.ref) ?? [];
     scopes.push(grant.granteeScopeId);
     grantees.set(grant.ref, scopes);
@@ -378,9 +369,7 @@ async function scopeModelOptions(deps: ApiCtx["deps"], values: Record<string, un
     baseModelOptions,
     modelCatalog: modelCatalogFor(baseModelOptions.map((model) => model.id)),
     fastModeModelIds: FAST_MODE_MODEL_IDS,
-    autoFlaggerDefault: defaultAutoFlaggerConfig(deps),
     memoryEmbeddingOptions: embeddingModelCatalog(),
-    browseModelOptions: selectableBaseModels().filter((m) => modelServiceable(m.id, managedKeys)),
   };
 }
 
@@ -483,8 +472,7 @@ export async function retention(ctx: ApiCtx): Promise<void> {
   if (!actor) return;
   audit(deps, { principalId: actor.id, action: "retention.read", resource: "retention", scopeLabel: scope });
   const sessionCount = (await deps.sessions?.countSessions()) ?? 0;
-  const participants = (await deps.sessions?.listParticipants()) ?? [];
-  const turns = (await deps.sessions?.attributedTurns()) ?? [];
-  const report = computeRetention({ sessionCount, participants, turns, nowMs: Date.now() });
+  const activity = (await deps.admin?.users.activity()) ?? [];
+  const report = computeRetention({ sessionCount, activity, nowMs: Date.now() });
   return sendJson(res, 200, { scopeId: scope, ...report });
 }

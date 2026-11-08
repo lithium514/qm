@@ -1,12 +1,13 @@
-import { toolCallApprovalKey } from "../../core/approval-id.ts";
+import { approvalCardId, toolCallApprovalKey } from "../../core/approval-id.ts";
 import { canonicalJson } from "../../../cli/src/canonical-json.ts";
 import { type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { tracePhase } from "../../../plugins/chassis/src/error-reporting.ts";
-import { errMessage, reportFailure } from "../../util/errors.ts";
+import { errMessage, reportFailure, swallow, swallowAs } from "../../util/errors.ts";
 import { redactCommand } from "../../sandbox/exec-process-session.ts";
 import { redactSecrets } from "../../../plugins/chassis/src/redact-secrets.ts";
 import { isObj } from "../../util/objects.ts";
+import { withAbort } from "../../util/async.ts";
 import type { ToolContextRef } from "../agent-tools.ts";
 import type { ToolKit } from "./kit.ts";
 
@@ -63,7 +64,7 @@ export function withRetrySafety(tool: ToolDefinition, marks: Map<string, RetryMa
 }
 
 const RESOURCE_TOOL_NAMES = new Set(["sandbox", "background", "files", "apps", "skills", "goal", "cron", "admin"]);
-const TOOL_APPROVAL_EXEMPT = new Set(["finish_silently", "tool_search", "mcp_call"]);
+const TOOL_APPROVAL_EXEMPT = new Set(["finish_silently", "tool_search", "mcp_call", "withdraw_approval"]);
 const STRICT_TOOL_APPROVAL_REASON = "strict posture: this tool call requires human approval";
 const DECLARED_TOOL_APPROVAL_REASON = "this tool asks for approval before each call";
 const APPROVAL_ARGS_MAX_CHARS = 16_000;
@@ -77,6 +78,15 @@ async function declaredApprovalReason(tool: ToolApprovalDeclaration, params: unk
   const needed =
     typeof tool.needsApproval === "function" ? await tool.needsApproval(params) : tool.needsApproval === true;
   return needed ? (tool.approvalReason ?? DECLARED_TOOL_APPROVAL_REASON) : undefined;
+}
+
+function keyedApprovalBlockedText(reason: string, callKey: string): string {
+  return (
+    `[blocked: needs human approval] ${reason}. ` +
+    `An approval card for this exact call (card ${approvalCardId(callKey)}) is now waiting for the person. ` +
+    "If they approve it, QM runs exactly this call and records its result in this conversation, so do not propose it again. " +
+    "If they change their mind before approving, withdraw the card with withdraw_approval."
+  );
 }
 
 function approvalCallText(label: string, params: unknown): string {
@@ -146,6 +156,7 @@ export function withToolApprovalGate(
                 summary: commandLabel,
                 grantModes: { session: false, always: false },
                 ...(isObj(params) && typeof params.purpose === "string" ? { purpose: params.purpose } : {}),
+                ...(isObj(params) ? { call: { tool: tool.name, input: params } } : {}),
               }
             : {
                 command: commandLabel,
@@ -173,7 +184,15 @@ export function withToolApprovalGate(
             reason,
           },
           {
-            content: [{ type: "text" as const, text: `[blocked: needs human approval] ${reason}` }],
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  callKey && isObj(params)
+                    ? keyedApprovalBlockedText(reason, callKey)
+                    : `[blocked: needs human approval] ${reason}`,
+              },
+            ],
             details: {},
             terminate: true,
           },
@@ -200,7 +219,11 @@ export function withToolSpan(tool: ToolDefinition, ref: ToolContextRef): ToolDef
   } as ToolDefinition;
 }
 
-export function withRuntimeBarrier(tool: ToolDefinition, ref: ToolContextRef): ToolDefinition {
+export function withRuntimeBarrier(
+  tool: ToolDefinition & { handlesAbort?: boolean },
+  kit: Pick<ToolKit, "ref" | "logResult">,
+): ToolDefinition {
+  const { ref, logResult } = kit;
   return {
     ...tool,
     async execute(...args) {
@@ -221,7 +244,7 @@ export function withRuntimeBarrier(tool: ToolDefinition, ref: ToolContextRef): T
       if (mutation) {
         ref.runtimeMutationPending = true;
         try {
-          await Promise.allSettled(ref.runtimeInFlight ?? []);
+          await withAbort(() => Promise.allSettled(ref.runtimeInFlight ?? []), ref.abortSignal).catch(() => undefined);
           if (ref.abortSignal?.aborted || ref.pausedOnApproval || ref.silentRequested)
             return {
               content: [{ type: "text" as const, text: "Runtime change cancelled before execution." }],
@@ -233,13 +256,34 @@ export function withRuntimeBarrier(tool: ToolDefinition, ref: ToolContextRef): T
           ref.runtimeMutationPending = false;
         }
       }
+      const [callId] = args;
       const inFlight = (ref.runtimeInFlight ??= new Set());
-      const result = Promise.resolve().then(() => tool.execute(...args));
-      inFlight.add(result);
+      const signal = tool.handlesAbort ? undefined : ref.abortSignal;
+      const stopped = (ref.stoppedCalls ??= new Set());
       try {
-        return await result;
-      } finally {
-        inFlight.delete(result);
+        signal?.throwIfAborted();
+        const running = Promise.resolve().then(() => tool.execute(...args));
+        inFlight.add(running);
+        void running.then(
+          () => {
+            inFlight.delete(running);
+            if (stopped.has(callId))
+              console.warn(`[agent] ${tool.name} call ${callId} finished after the turn stopped`);
+          },
+          (error: unknown) => {
+            inFlight.delete(running);
+            if (stopped.has(callId)) swallow(`${tool.name}: call ${callId} failed after the turn stopped`, error);
+          },
+        );
+        return await withAbort(() => running, signal);
+      } catch (error) {
+        if (signal?.aborted) {
+          stopped.add(callId);
+          await logResult({ tool: tool.name, callId, isError: true, result: errMessage(error) }).catch(
+            swallowAs(`${tool.name}: record stopped result`, undefined),
+          );
+        }
+        throw error;
       }
     },
   };

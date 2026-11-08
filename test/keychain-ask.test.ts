@@ -31,6 +31,7 @@ import { createIdempotencyStore, type IdempotencyRecord } from "../src/idempoten
 import { createIdentityService } from "../src/identity/identity-service.ts";
 import { deriveConnectorKey } from "../src/connectors/connector-client-store.ts";
 import { mintCapabilityToken, CAPABILITY_TTL_MS, type CapabilityClaims } from "../src/auth/capability-token.ts";
+import { mintSignedPayload } from "../src/auth/signed-token.ts";
 import { scopeId, type TurnRequest, type TurnResult } from "../src/types.ts";
 import { fakeSprites } from "./support/auto-fake-sprites.ts";
 import { testConfig } from "./support/test-config.ts";
@@ -40,6 +41,7 @@ import { singleProcessDeps } from "./support/single-process.ts";
 import { testAdvisoryLock, testMap, testDatabaseUrl } from "./support/test-database.ts";
 import { createPostgresCronFireStore } from "../src/cron/fire-store.ts";
 import { createPostgresReplayDedupe } from "../src/auth/replay-dedupe.ts";
+import { USER_ITEM_KINDS } from "../src/sessions/items.ts";
 
 const KEY = deriveConnectorKey("keychain-ask-test-key");
 const SECRET = "keychain-ask-route-secret".repeat(3);
@@ -394,7 +396,7 @@ test("runTrigger marks every trigger-fired turn `triggered` (the consent-gate cl
     },
   );
   assert.equal(outcome.ran, true);
-  assert.equal(seen?.triggered, true);
+  assert.equal(seen?.origin?.kind, "automation");
   assert.equal(seen?.thinkingLevel, undefined);
   assert.equal(seen?.fastMode, undefined);
   assert.equal(seen?.conversation.threadRef, "ch:C1-t1", "an explicit threadRef overrides the per-fire fireKey thread");
@@ -558,8 +560,8 @@ describe("/v1/keychain/asks — card approval end to end", async () => {
   const decide = (askId: string, actorId: string, decision: "once" | "standing" | "deny") =>
     approvals.decide(askId, { externalId: actorId }, decision);
   const resumeTurns = async (sessionId: string, pattern: RegExp) =>
-    (await built.sessions.getEntries(sessionId)).filter(
-      (e) => e.type === "user" && pattern.test((e.payload as { text: string }).text),
+    (await built.sessions.getItems(sessionId)).filter(
+      (item) => USER_ITEM_KINDS.includes(item.kind) && pattern.test(item.text ?? ""),
     );
 
   const capFor = (actorId: string, scope = scopeId("personal", actorId), extra: Partial<CapabilityClaims> = {}) =>
@@ -620,7 +622,6 @@ describe("/v1/keychain/asks — card approval end to end", async () => {
       keychainApprovals: approvals,
       deliveries: built.deliveries,
       ...(built.fireAskResolution ? { fireAskResolution: built.fireAskResolution } : {}),
-      workspace: built.workspace,
       auditLog: built.auditLog,
       credentialUsage: built.credentialUsage,
     });
@@ -688,11 +689,11 @@ describe("/v1/keychain/asks — card approval end to end", async () => {
     };
     assert.deepEqual(await inline("U_ALICE"), [`keychain:${ask.id}`], "the owner sees the card inline in the session");
     const path = `/v1/keychain/approvals/${ask.id}`;
-    const signed = (principalId: string) => {
-      const body = JSON.stringify({ principalId, decision: "standing" });
+    const signed = (principalId: string, identity: Record<string, string> = {}, decision = "standing") => {
+      const body = JSON.stringify({ principalId, decision });
       return fetch(`${base}${path}`, {
         method: "POST",
-        headers: signedRequestHeaders(SECRET, "POST", path, body),
+        headers: { ...signedRequestHeaders(SECRET, "POST", path, body), ...identity },
         body,
       });
     };
@@ -701,6 +702,13 @@ describe("/v1/keychain/asks — card approval end to end", async () => {
       200,
     );
     assert.equal((await signed("U_BOB")).status, 403);
+    const impersonation = await mintSignedPayload({ p: "U_ALICE", imp: "U_BOB", exp: Date.now() + 60_000 }, SECRET);
+    const impersonated = await signed("U_ALICE", { "x-portal-identity": impersonation }, "once");
+    assert.deepEqual(
+      [impersonated.status, ((await impersonated.json()) as { message?: string }).message],
+      [403, "Sign in as yourself to decide on credential use."],
+      "an admin impersonating the owner cannot decide for them",
+    );
     const res = await signed("U_ALICE");
     assert.equal(res.status, 200);
     const view = (await res.json()) as any;
@@ -870,7 +878,8 @@ describe("/v1/keychain/asks — card approval end to end", async () => {
 
     const resolution = await waitFor(() => resumeTurns(session!.id, /The credential owner approved access/));
     assert.equal(resolution.length, 1, "exactly one resolution turn, in the original thread's session");
-    const { text: prompt, environment } = resolution[0]!.payload as { text: string; environment: string };
+    const prompt = resolution[0]!.text ?? "";
+    const environment = String(resolution[0]!.body.environment);
     const listSystems = async () =>
       (await built.sessions.listLlmRequests(session!.id)).map((r) => (r.promptEnvelope as { system: string }).system);
     await waitFor(async () => ((await listSystems()).at(-1)?.includes(`\`github:${gh.id}\``) ? [true] : []));
@@ -992,7 +1001,7 @@ describe("/v1/keychain/asks — card approval end to end", async () => {
         });
         const seed = await built.app.turn({
           surface: "cron",
-          triggered: true,
+          origin: { kind: "automation" },
           actor: { externalId: requesterId },
           conversation: {
             kind: kind === "channel" ? "channel" : "group",
@@ -1211,7 +1220,7 @@ describe("/v1/keychain/asks — card approval end to end", async () => {
     await built.scheduler.tick(Date.now());
     const resolved = await waitFor(() => resumeTurns(session!.id, /did not answer the access request/));
     assert.equal(resolved.length, 1, "exactly one expired-resolution turn in the asking thread");
-    assert.ok(!(resolved[0]!.payload as { text: string }).text.includes(made.ask.id));
+    assert.ok(!resolved[0]!.text!.includes(made.ask.id));
 
     await built.scheduler.tick(Date.now());
     assert.equal(
@@ -1250,7 +1259,7 @@ test("turn e2e: trigger-fired turns mint `triggered` into the capability token; 
       actor: { externalId: "U_ALICE" },
       conversation: { kind: "channel", threadRef: "ch:C9-t", channelRef: "C9", audience: [{ externalId: "U_ALICE" }] },
       text: "!run true",
-      ...(triggered ? { triggered: true } : {}),
+      ...(triggered ? { origin: { kind: "automation" } } : {}),
     }) as TurnRequest;
 
   assert.equal((await built.app.turn(turn(false))).status, "ok");

@@ -643,15 +643,16 @@ async function feishuConversations(ctx: ApiCtx): Promise<void> {
   const until = Date.now();
   const requested = Number(ctx.url.searchParams.get("since"));
   const since = Number.isFinite(requested) && requested > 0 ? requested : until - FEISHU_READ_WINDOW_MS;
-  if (since < until - FEISHU_READ_MAX_WINDOW_MS) {
-    return sendJson(ctx.res, 400, {
-      error: "bad_request",
-      message: `since is more than ${FEISHU_READ_MAX_WINDOW_MS / 86_400_000} days old`,
-    });
-  }
+  const clamped = since < until - FEISHU_READ_MAX_WINDOW_MS;
+  const windowStart = clamped ? until - FEISHU_READ_MAX_WINDOW_MS : since;
   try {
-    const result = await readFeishuConversations(readerFactory(token), { since, until });
-    sendJson(ctx.res, 200, { since, until, ...result });
+    const result = await readFeishuConversations(readerFactory(token), { since: windowStart, until });
+    sendJson(ctx.res, 200, {
+      since: windowStart,
+      until,
+      ...(clamped ? { requestedSince: since, clamped: true } : {}),
+      ...result,
+    });
   } catch (err) {
     reportFailure("feishu: read conversations", err, `loop=${loop.id}`);
     sendJson(ctx.res, 502, { error: "upstream", message: errMessage(err) });

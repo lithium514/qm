@@ -1,6 +1,7 @@
 import type { DeliveryStore } from "../../delivery/delivery-store.ts";
 import { reachEnqueue } from "../../reach/reach.ts";
 import type { ActorAssertion } from "../../types.ts";
+import { surfaceCapabilities } from "../capabilities.ts";
 import type { Surface, SurfacePromptHints } from "../contract.ts";
 import type { SurfaceCache } from "../../surface-cache/types.ts";
 import {
@@ -39,14 +40,15 @@ export function createPartnerChatSurface(deps: {
   surfaceCache: Pick<SurfaceCache, "readMessages">;
   label?: string;
 }): Surface<null> {
+  const caps = surfaceCapabilities("partner-chat");
   return {
     kind: "partner-chat",
     label: deps.label ?? DEFAULT_LABEL,
     capabilities: {
-      mirrored: true,
-      liveReplies: false,
-      nativeActor: true,
-      externalParticipants: false,
+      mirrored: caps.historyRevisions,
+      liveReplies: caps.replyEngagement,
+      nativeActor: caps.actingUserId,
+      externalParticipants: caps.externalAudience,
       textOnly: true,
     },
     promptHints: DEFAULT_PROMPT_HINTS,

@@ -1,4 +1,4 @@
-import { configureFeishuApp, feishuClient, feishuDomain } from "./lib/feishu-app.ts";
+import { configureFeishuApp, feishuClient, feishuDomain, feishuOAuthRedirectUrl } from "./lib/feishu-app.ts";
 
 const appId = process.env.FEISHU_APP_ID?.trim();
 const appSecret = process.env.FEISHU_APP_SECRET?.trim();
@@ -10,11 +10,7 @@ if (!appId || !appSecret) {
 const domain = feishuDomain(process.env.FEISHU_DOMAIN);
 const cardCallbackUrl = process.env.FEISHU_CARD_CALLBACK_URL?.trim();
 await configureFeishuApp(feishuClient(appId, appSecret, domain), appId, cardCallbackUrl);
-const redirectUrl =
-  process.env.FEISHU_OAUTH_REDIRECT_URL?.trim() ??
-  (process.env.PUBLIC_WEB_URL
-    ? `${process.env.PUBLIC_WEB_URL.replace(/\/$/, "")}/v1/connectors/oauth/feishu/callback`
-    : undefined);
+const redirectUrl = feishuOAuthRedirectUrl(cardCallbackUrl);
 console.log(
   cardCallbackUrl
     ? `configured: long-connection events, webhook card callbacks -> ${cardCallbackUrl}, OAuth redirect -> ${redirectUrl ?? "(none)"}, bot ability`

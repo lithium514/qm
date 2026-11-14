@@ -58,6 +58,15 @@ const FEISHU: SurfaceCapabilities = {
   chatRefusalCopy: true,
 };
 
+const PARTNER_CHAT: SurfaceCapabilities = {
+  ...GENERIC,
+  id: "partner-chat",
+  label: "Partner chat",
+  toolName: "partner-chat",
+  historyRevisions: true,
+  actingUserId: true,
+};
+
 const WEB: SurfaceCapabilities = {
   ...GENERIC,
   id: "web",
@@ -68,6 +77,7 @@ const WEB: SurfaceCapabilities = {
 export function surfaceCapabilities(id: string | undefined): SurfaceCapabilities {
   if (id === "slack") return SLACK;
   if (id === "feishu") return FEISHU;
+  if (id === "partner-chat") return PARTNER_CHAT;
   if (id === "web") return WEB;
   return id ? { ...GENERIC, id, label: "chat", toolName: id } : GENERIC;
 }

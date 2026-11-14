@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createActorGate, createDenyResponder, normalizeAllowFrom, parseAllowFrom } from "../src/slack/allow-from.ts";
+import { createActorGate, createDenyResponder } from "../src/slack/allow-from.ts";
+import { normalizeAllowFrom, parseAllowFrom } from "../src/util/allow-from.ts";
 import { slackAccountConfigsFromEnv, slackPluginConfigFromEnv } from "../src/slack/config.ts";
 
 test("parseAllowFrom splits, lowercases, strips @-prefixes, and dedupes", () => {

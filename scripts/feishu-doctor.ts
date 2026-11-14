@@ -1,22 +1,18 @@
-import * as lark from "@larksuiteoapi/node-sdk";
+import { createFeishuChannel, createFeishuClient } from "../src/feishu/channel.ts";
+import { feishuPluginConfigFromEnv } from "../src/feishu/config.ts";
 
-const appId = process.env.FEISHU_APP_ID?.trim();
-const appSecret = process.env.FEISHU_APP_SECRET?.trim();
-if (!appId || !appSecret) {
-  console.error("Set FEISHU_APP_ID and FEISHU_APP_SECRET (or run npm run feishu-login).");
-  process.exit(1);
+const config = feishuPluginConfigFromEnv(process.env);
+if (!config) {
+  throw new Error("Set FEISHU_APP_ID and FEISHU_APP_SECRET (or run npm run feishu-login).");
 }
-
-const id = appId;
-const secret = appSecret;
-const domain = process.env.FEISHU_DOMAIN?.trim().toLowerCase() === "lark" ? lark.Domain.Lark : lark.Domain.Feishu;
+const readyConfig = config;
 
 interface BotInfo {
   bot?: { app_name?: string; open_id?: string; avatar_url?: string };
 }
 
 async function main(): Promise<void> {
-  const client = new lark.Client({ appId: id, appSecret: secret, appType: lark.AppType.SelfBuild, domain });
+  const client = createFeishuClient(readyConfig);
   const bot = (await client.request({ method: "GET", url: "/open-apis/bot/v3/info" })) as BotInfo;
   console.log(`bot: ${bot.bot?.app_name ?? "(unnamed)"} ${bot.bot?.open_id ?? ""}`);
 
@@ -30,13 +26,7 @@ async function main(): Promise<void> {
     }
   }
 
-  const channel = lark.createLarkChannel({
-    appId: id,
-    appSecret: secret,
-    domain,
-    transport: "websocket",
-    includeRawEvent: true,
-  });
+  const channel = createFeishuChannel(readyConfig);
   try {
     await channel.connect();
     console.log(

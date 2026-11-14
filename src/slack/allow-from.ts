@@ -1,5 +1,4 @@
 import type { ActorAssertion } from "./identity.ts";
-export { normalizeAllowFrom, parseAllowFrom } from "../util/allow-from.ts";
 
 export type ActorGate = (actor: ActorAssertion) => boolean;
 

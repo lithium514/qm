@@ -40,6 +40,7 @@ export interface FeishuConversation {
 export interface FeishuConversationsResult {
   viewerOpenId?: string;
   conversations: FeishuConversation[];
+  overflowChats?: number;
 }
 
 const MAX_PAGES = 100;
@@ -64,18 +65,33 @@ export function createFeishuUserReader(appId: string, appSecret: string, token: 
       return res.data?.open_id;
     },
     async listChats() {
-      const res = await client.im.v1.chat.list({ params: { page_size: 100, user_id_type: "open_id" } }, options);
-      return (res.data?.items ?? []).flatMap((chat) => {
-        const chatId = chat.chat_id;
-        if (!chatId) return [];
-        return [
+      const chats: FeishuReaderChat[] = [];
+      let pageToken: string | undefined;
+      for (let page = 0; ; page++) {
+        if (page >= MAX_PAGES) throw new FeishuReadOverflow(`more than ${MAX_PAGES * 100} Feishu chats`);
+        const res = await client.im.v1.chat.list(
           {
+            params: {
+              page_size: 100,
+              user_id_type: "open_id",
+              ...(pageToken ? { page_token: pageToken } : {}),
+            },
+          },
+          options,
+        );
+        for (const chat of res.data?.items ?? []) {
+          const chatId = chat.chat_id;
+          if (!chatId) continue;
+          chats.push({
             chatId,
             ...(chat.name ? { name: chat.name } : {}),
             isDirect: chatIsDirect(chat),
-          },
-        ];
-      });
+          });
+        }
+        if (!res.data?.has_more || !res.data.page_token) break;
+        pageToken = res.data.page_token;
+      }
+      return chats;
     },
     async listMembers(chatId) {
       const members: FeishuReaderMember[] = [];
@@ -149,9 +165,9 @@ export async function readFeishuConversations(
   opts: { since: number; until: number },
 ): Promise<FeishuConversationsResult> {
   const [viewerOpenId, chats] = await Promise.all([reader.viewerOpenId(), reader.listChats()]);
-  if (chats.length > MAX_CHATS) throw new FeishuReadOverflow(`more than ${MAX_CHATS} Feishu chats`);
+  const overflowChats = Math.max(0, chats.length - MAX_CHATS);
   const conversations: FeishuConversation[] = [];
-  for (const chat of chats) {
+  for (const chat of chats.slice(0, MAX_CHATS)) {
     const messages = await reader.listMessages(chat.chatId, opts.since, opts.until);
     const human = messages.filter((message) => message.senderType !== "app");
     if (!human.length) continue;
@@ -169,5 +185,9 @@ export async function readFeishuConversations(
       })),
     });
   }
-  return { ...(viewerOpenId ? { viewerOpenId } : {}), conversations };
+  return {
+    ...(viewerOpenId ? { viewerOpenId } : {}),
+    conversations,
+    ...(overflowChats ? { overflowChats } : {}),
+  };
 }

@@ -1,3 +1,4 @@
+import { normalizeCardAction } from "@larksuiteoapi/node-sdk";
 import { isObj } from "../util/objects.ts";
 
 function rec(value: unknown): Record<string, unknown> | undefined {
@@ -29,7 +30,8 @@ export function parseEventEnvelope(body: unknown): FeishuEventEnvelope | undefin
   const root = rec(body);
   if (!root) return undefined;
   const header = rec(root.header);
-  const event = rec(root.event) ?? root;
+  const event = rec(root.event);
+  if (!event) return undefined;
   return {
     ...(str(header?.event_id) ? { eventId: str(header?.event_id) } : {}),
     ...(str(header?.event_type) ? { eventType: str(header?.event_type) } : {}),
@@ -79,26 +81,20 @@ export interface FeishuCardAction {
 }
 
 export function parseCardAction(body: unknown): FeishuCardAction | undefined {
-  const root = rec(body);
   const envelope = parseEventEnvelope(body);
-  if (!root || !envelope) return undefined;
-  const event = envelope.event;
-  const operator = rec(event.operator);
-  const context = rec(event.context);
-  const action = rec(event.action);
-  const operatorOpenId = str(operator?.open_id) ?? str(event.open_id) ?? "";
-  const messageId = str(context?.open_message_id) ?? str(event.open_message_id) ?? "";
-  if (!operatorOpenId || !messageId) return undefined;
+  if (!envelope) return undefined;
+  const action = normalizeCardAction(envelope.event as Parameters<typeof normalizeCardAction>[0], { includeRaw: true });
+  if (!action) return undefined;
   return {
     ...(envelope.eventId ? { eventId: envelope.eventId } : {}),
     ...(envelope.tenantKey ? { tenantKey: envelope.tenantKey } : {}),
-    operatorOpenId,
-    ...(str(operator?.user_id) ? { operatorUserId: str(operator?.user_id) } : {}),
-    messageId,
-    chatId: str(context?.open_chat_id) ?? str(event.open_chat_id) ?? "",
-    ...(str(action?.tag) ? { actionTag: str(action?.tag) } : {}),
-    ...(str(action?.name) ? { actionName: str(action?.name) } : {}),
-    ...(action?.value !== undefined ? { value: action.value } : {}),
+    operatorOpenId: action.operator.openId,
+    ...(action.operator.userId ? { operatorUserId: action.operator.userId } : {}),
+    messageId: action.messageId,
+    chatId: action.chatId,
+    ...(action.action.tag ? { actionTag: action.action.tag } : {}),
+    ...(action.action.name ? { actionName: action.action.name } : {}),
+    ...(action.action.value !== undefined ? { value: action.action.value } : {}),
   };
 }
 

@@ -1,5 +1,5 @@
 import { createHash, timingSafeEqual } from "node:crypto";
-import { AESCipher } from "@larksuiteoapi/node-sdk";
+import { AESCipher, generateChallenge } from "@larksuiteoapi/node-sdk";
 import { PayloadTooLargeError, readBodyBytes } from "../../plugins/chassis/src/http.ts";
 import { sendJson } from "../api/http.ts";
 import type { BaseCtx, Route } from "../api/routes/route.ts";
@@ -104,19 +104,6 @@ function decodeBody(parsed: unknown, encryptKey: string | undefined): unknown {
   return decrypted;
 }
 
-function tokenOf(body: unknown): string | undefined {
-  if (!isObj(body)) return undefined;
-  if (typeof body.token === "string") return body.token;
-  const headerValue = body.header;
-  return isObj(headerValue) && typeof headerValue.token === "string" ? headerValue.token : undefined;
-}
-
-function challengeOf(body: unknown): string | undefined {
-  return isObj(body) && body.type === "url_verification" && typeof body.challenge === "string"
-    ? body.challenge
-    : undefined;
-}
-
 async function handleFeishuCard(ctx: BaseCtx): Promise<void> {
   console.log(`[feishu] card callback ${ctx.method} ${ctx.pathname}`);
   const endpoint = ctx.deps.feishuCard;
@@ -146,15 +133,20 @@ async function handleFeishuCard(ctx: BaseCtx): Promise<void> {
     sendJson(ctx.res, 400, { error: "bad_request" });
     return;
   }
-  const challenge = challengeOf(body);
-  if (challenge) {
-    if (endpoint.verificationToken && tokenOf(body) !== endpoint.verificationToken) {
-      console.error("[feishu] card callback challenge rejected: invalid token");
-      sendJson(ctx.res, 401, { error: "invalid_token" });
-      return;
-    }
+  let challenge;
+  try {
+    challenge = generateChallenge(outer as Record<string, unknown>, {
+      encryptKey: endpoint.encryptKey ?? "",
+      ...(endpoint.verificationToken ? { verificationToken: endpoint.verificationToken } : {}),
+    });
+  } catch {
+    console.error("[feishu] card callback challenge rejected");
+    sendJson(ctx.res, 401, { error: "invalid_token" });
+    return;
+  }
+  if (challenge.isChallenge) {
     console.log("[feishu] card callback challenge");
-    sendJson(ctx.res, 200, { challenge });
+    sendJson(ctx.res, 200, challenge.challenge);
     return;
   }
   const timestamp = header(ctx.req, "x-lark-request-timestamp");

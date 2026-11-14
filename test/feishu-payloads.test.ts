@@ -22,12 +22,6 @@ test("parseEventEnvelope unwraps the v2 schema", () => {
   assert.deepEqual(envelope?.event, { hello: "world" });
 });
 
-test("parseEventEnvelope tolerates a flat v1 body", () => {
-  const envelope = parseEventEnvelope({ token: "x", event: { message_id: "om_1" } });
-  assert.deepEqual(envelope?.event, { message_id: "om_1" });
-  assert.equal(parseEventEnvelope(undefined), undefined);
-});
-
 test("parseCardAction reads the v2 context and action value", () => {
   const action = parseCardAction({
     schema: "2.0",
@@ -48,19 +42,6 @@ test("parseCardAction reads the v2 context and action value", () => {
     actionName: "approve",
     value: { qm: "approval", id: "a_1", value: "allow_once" },
   });
-});
-
-test("parseCardAction falls back to the flat v1 fields", () => {
-  const action = parseCardAction({
-    open_id: "ou_1",
-    open_message_id: "om_1",
-    open_chat_id: "oc_1",
-    action: { tag: "button", value: { qm: "keychain", id: "k_1" } },
-  });
-  assert.equal(action?.operatorOpenId, "ou_1");
-  assert.equal(action?.messageId, "om_1");
-  assert.equal(action?.chatId, "oc_1");
-  assert.deepEqual(action?.value, { qm: "keychain", id: "k_1" });
 });
 
 test("parseCardAction rejects payloads without an operator or message", () => {

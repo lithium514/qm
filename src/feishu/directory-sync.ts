@@ -4,6 +4,7 @@ import type {
   DirectoryMember,
   DirectoryStore,
 } from "../directory/directory-store.ts";
+import type { LeaderLease } from "../persistence/leader-lease.ts";
 import { createSweeper, type Sweeper } from "../util/sweeper.ts";
 import { listChatMembers, listChats, type FeishuClient } from "./directory.ts";
 
@@ -18,6 +19,7 @@ export function createFeishuDirectorySync(opts: {
   directory: DirectoryStore;
   botOpenId?: string | (() => string | undefined);
   intervalMs?: number;
+  leaderLease?: LeaderLease;
 }): FeishuDirectorySync {
   const run = async (): Promise<void> => {
     const upsertMembers = opts.directory.upsertMembers?.bind(opts.directory);
@@ -56,7 +58,8 @@ export function createFeishuDirectorySync(opts: {
   return {
     run,
     start() {
-      sweeper ??= createSweeper(() => run(), opts.intervalMs ?? 5 * 60_000, {
+      const pass = () => (opts.leaderLease ? opts.leaderLease.hold("feishu:directory-sync", () => run()) : run());
+      sweeper ??= createSweeper(pass, opts.intervalMs ?? 5 * 60_000, {
         label: "feishu directory sync",
         immediate: true,
       });

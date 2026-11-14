@@ -1369,9 +1369,13 @@ export function draftMessageTpl(item: InboxItem): TemplateResult | typeof nothin
   const busy = chatting.has(item.id);
   const draft = effectiveDraft(item);
   const gmail = item.source === "gmail";
+  const sourceLabel =
+    ({ gmail: "Gmail", slack: "Slack", feishu: "Feishu" } as Record<string, string>)[item.source] ?? "source";
+  const draftClass =
+    ({ gmail: "email", slack: "slack", feishu: "feishu" } as Record<string, string>)[item.source] ?? "slack";
   const showCc = gmail && ((draft.cc?.length ?? 0) > 0 || (item.gmail?.cc?.length ?? 0) > 0);
   return html`
-    <div class="inbox-draft ${gmail ? "email" : "slack"}">
+    <div class="inbox-draft ${draftClass}">
       <div class="inbox-draft-head">
         <span class="inbox-draft-label">Draft reply</span>
         ${
@@ -1389,7 +1393,7 @@ export function draftMessageTpl(item: InboxItem): TemplateResult | typeof nothin
         ${
           item.externalUrl
             ? html`<a class="inbox-external-link" href=${item.externalUrl} target="_blank" rel="noreferrer noopener">
-                ${icon(ArrowUpRight, 12)}<span>Open in ${gmail ? "Gmail" : "Slack"}</span>
+                ${icon(ArrowUpRight, 12)}<span>Open in ${sourceLabel}</span>
               </a>`
             : nothing
         }

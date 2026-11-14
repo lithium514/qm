@@ -157,6 +157,13 @@ export function createPostgresSurfaceCache(
       ],
     },
     {
+      id: "surface-cache/store/0010-created",
+      statements: [
+        `CREATE INDEX CONCURRENTLY IF NOT EXISTS channel_messages_by_created
+            ON channel_messages(org_id, surface, account, container, created_at)`,
+      ],
+    },
+    {
       id: "surface-cache/store/0011-source",
       statements: [`ALTER TABLE channel_state ADD COLUMN IF NOT EXISTS source JSONB`],
     },

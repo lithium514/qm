@@ -58,6 +58,13 @@ export function createFeishuCore(
       return app.turn(request);
     },
     ...(keychainApprovals ? { keychainApprovals } : {}),
+    ...(identity
+      ? {
+          resolvePrincipal(externalId: string) {
+            return identity.resolve({ externalId }).id;
+          },
+        }
+      : {}),
     ...(inboxEvent
       ? {
           async inboxEvent(event: ConversationEvent) {

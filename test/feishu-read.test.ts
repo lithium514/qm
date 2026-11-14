@@ -66,32 +66,31 @@ test("feishu conversations carry the viewer, sender names, and thread roots", as
   assert.equal(result.conversations[1]?.messages[0]?.threadId, "om_root");
 });
 
-test("feishu reads keep going when one chat's member or message read fails", async () => {
+test("feishu reads keep going when one chat's member read fails", async () => {
   const result = await readFeishuConversations(
     reader({
-      async listMembers(chatId) {
-        if (chatId === "oc_dm") throw new Error("members down");
-        return [];
-      },
-      async listMessages(chatId, _since, _until) {
-        if (chatId === "oc_empty") return [];
-        if (chatId === "oc_group") throw new Error("messages down");
-        return [{ messageId: "om_1", chatId, senderId: "ou_ada", at: 10, text: "hello" }];
+      async listMembers() {
+        throw new Error("members down");
       },
     }),
     { since: 0, until: 100 },
   );
   assert.deepEqual(
     result.conversations.map((conversation) => conversation.chatId),
-    ["oc_dm"],
+    ["oc_dm", "oc_group"],
   );
-  assert.equal(result.conversations[0]?.messages[0]?.senderName, undefined);
 });
 
-test("feishu reads honor the chat limit", async () => {
-  const result = await readFeishuConversations(reader(), { since: 0, until: 100, limit: 1 });
-  assert.deepEqual(
-    result.conversations.map((conversation) => conversation.chatId),
-    ["oc_dm"],
+test("feishu reads fail loudly when a message read fails", async () => {
+  await assert.rejects(
+    readFeishuConversations(
+      reader({
+        async listMessages() {
+          throw new Error("messages down");
+        },
+      }),
+      { since: 0, until: 100 },
+    ),
+    /messages down/,
   );
 });

@@ -22,30 +22,12 @@ import { createFeishuApprovalHandler, createFeishuDeployHandler, createFeishuKey
 const MAX_INBOUND_FILES = 10;
 const MAX_INBOUND_FILE_BYTES = 30 * 1024 * 1024;
 
-const MIME_BY_EXTENSION: Record<string, string> = {
-  png: "image/png",
-  jpg: "image/jpeg",
-  jpeg: "image/jpeg",
-  gif: "image/gif",
-  webp: "image/webp",
-  pdf: "application/pdf",
-  txt: "text/plain",
-  md: "text/markdown",
-  csv: "text/csv",
-  json: "application/json",
-  zip: "application/zip",
-  doc: "application/msword",
-  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  xls: "application/vnd.ms-excel",
-  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  ppt: "application/vnd.ms-powerpoint",
-  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-};
+import { MIME_BY_EXT } from "../core/documents.ts";
 
 export function mimeTypeForName(name: string): string {
   const dot = name.lastIndexOf(".");
   if (dot < 0) return "application/octet-stream";
-  return MIME_BY_EXTENSION[name.slice(dot + 1).toLowerCase()] ?? "application/octet-stream";
+  return MIME_BY_EXT[name.slice(dot + 1).toLowerCase()] ?? "application/octet-stream";
 }
 
 function resourceName(resource: ResourceDescriptor): string {

@@ -24,6 +24,7 @@ import {
 import { THINKING_LEVELS } from "../../model/pi-models.ts";
 import { principalDestination } from "../../reach/reach.ts";
 import { readFeishuConversations } from "../../feishu/read.ts";
+import { reportFailure } from "../../util/errors.ts";
 
 const MAX_ITEMS_PER_INGEST = 50;
 const MAX_SOURCE_PAYLOAD_BYTES = 64_000;
@@ -619,7 +620,6 @@ function serializeItemAction(handler: (ctx: ApiCtx) => Promise<void>): (ctx: Api
 }
 
 const FEISHU_READ_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
-const FEISHU_READ_MAX_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 async function feishuConversations(ctx: ApiCtx): Promise<void> {
   const loaded = await loadAdministrable(ctx);
@@ -641,14 +641,12 @@ async function feishuConversations(ctx: ApiCtx): Promise<void> {
   }
   const until = Date.now();
   const requested = Number(ctx.url.searchParams.get("since"));
-  const since =
-    Number.isFinite(requested) && requested > 0
-      ? Math.max(requested, until - FEISHU_READ_MAX_WINDOW_MS)
-      : until - FEISHU_READ_WINDOW_MS;
+  const since = Number.isFinite(requested) && requested > 0 ? requested : until - FEISHU_READ_WINDOW_MS;
   try {
-    const result = await readFeishuConversations(readerFactory(token), { since, until, limit: 50 });
+    const result = await readFeishuConversations(readerFactory(token), { since, until });
     sendJson(ctx.res, 200, { since, until, ...result });
   } catch (err) {
+    reportFailure("feishu: read conversations", err, `loop=${loop.id}`);
     sendJson(ctx.res, 502, { error: "upstream", message: errMessage(err) });
   }
 }

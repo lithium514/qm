@@ -7,7 +7,7 @@ import type { Config } from "./config.ts";
 import { buildApp, serverDeps } from "./wiring.ts";
 import { createServer } from "./api/server.ts";
 import { dockerDaemonFailure } from "./deploy/docker-deploy-provider.ts";
-import { errMessage, reportFailureAs } from "./util/errors.ts";
+import { errMessage, reportFailure, reportFailureAs } from "./util/errors.ts";
 import { sleep } from "./util/async.ts";
 import { slackAccountConfigsFromEnv, slackPluginConfigFromEnv, startSlackPlugin } from "./slack/index.ts";
 import { createSlackRuntimeReconciler } from "./surfaces/slack-runtime.ts";
@@ -16,8 +16,7 @@ import { sessionLifetime } from "../plugins/portal/src/session.ts";
 import { startFrontDoor } from "./web/front-door.ts";
 import { createFeishuCore, feishuPluginConfigFromEnv, startFeishuSurface, type FeishuSurface } from "./feishu/index.ts";
 import type { FeishuCardEndpoint } from "./feishu/http.ts";
-import type { FeishuCardAction } from "./feishu/payloads.ts";
-import type { FeishuCardResponse } from "./feishu/handler.ts";
+import { createFeishuCardHandler } from "./feishu/handler.ts";
 
 export async function startQm(
   config: Config,
@@ -32,13 +31,24 @@ export async function startQm(
   if (slackConfig) slackEnvironmentState = "configured";
   const feishuConfig = feishuPluginConfigFromEnv(env);
   let feishuSurface: FeishuSurface | undefined;
-  let feishuCardHandler: ((action: FeishuCardAction) => Promise<FeishuCardResponse | undefined>) | undefined;
+  const feishuCore = feishuConfig
+    ? createFeishuCore(
+        built.app,
+        built.blobTransfer,
+        built.sessions,
+        built.keychainApprovals,
+        built.identity,
+        built.directory,
+        built.inboxEvent,
+      )
+    : undefined;
+  const feishuCardHandler = feishuCore ? createFeishuCardHandler({ core: feishuCore }) : undefined;
   const feishuCard: FeishuCardEndpoint | undefined =
-    feishuConfig && (feishuConfig.verificationToken || feishuConfig.encryptKey)
+    feishuConfig && feishuCardHandler && (feishuConfig.verificationToken || feishuConfig.encryptKey)
       ? {
           ...(feishuConfig.verificationToken ? { verificationToken: feishuConfig.verificationToken } : {}),
           ...(feishuConfig.encryptKey ? { encryptKey: feishuConfig.encryptKey } : {}),
-          handle: (action) => feishuCardHandler?.(action) ?? Promise.resolve(undefined),
+          handle: (action) => feishuCardHandler(action),
         }
       : undefined;
   const managedSlack = env.QM_SLACK_SERVICE_URL
@@ -87,22 +97,14 @@ export async function startQm(
     try {
       feishuSurface = await startFeishuSurface({
         config: feishuConfig,
-        core: createFeishuCore(
-          built.app,
-          built.blobTransfer,
-          built.sessions,
-          built.keychainApprovals,
-          built.identity,
-          built.directory,
-          built.inboxEvent,
-        ),
+        core: feishuCore!,
+        ...(feishuCardHandler ? { cardHandler: feishuCardHandler } : {}),
         leaderLease: built.leaderLease,
         directory: built.directory,
       });
-      feishuCardHandler = feishuSurface.handleCardAction;
       console.log(`[qm] feishu connected as ${feishuSurface.channel.botIdentity?.name ?? "bot"}`);
     } catch (error) {
-      console.error("[qm] feishu start failed:", errMessage(error));
+      reportFailure("feishu start", error);
     }
   }
 

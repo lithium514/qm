@@ -156,3 +156,48 @@ export function parseMessageRecall(body: unknown): FeishuRecall | undefined {
     ...(str(operator?.open_id) ? { operatorOpenId: str(operator?.open_id) } : {}),
   };
 }
+
+function postText(value: unknown): string {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return "";
+  const post = value as { title?: unknown; content?: unknown };
+  const lines = Array.isArray(post.content) ? post.content : [];
+  const rendered = lines.map((line) => {
+    if (!Array.isArray(line)) return "";
+    return line
+      .map((node) => {
+        if (typeof node !== "object" || node === null) return "";
+        const n = node as Record<string, unknown>;
+        if (typeof n.text === "string") return n.text;
+        if (typeof n.user_name === "string") return `@${n.user_name}`;
+        if (typeof n.user_id === "string") return `@${n.user_id}`;
+        if (typeof n.emoji_type === "string") return `:${n.emoji_type}:`;
+        if (n.tag === "img") return "[image]";
+        if (n.tag === "media") return "[media]";
+        return "";
+      })
+      .join("");
+  });
+  return [typeof post.title === "string" ? post.title : "", ...rendered].filter((line) => line.trim()).join("\n");
+}
+
+export function feishuMessageText(messageType: string | undefined, content: string | undefined): string {
+  if (!content) return "";
+  try {
+    const parsed: unknown = JSON.parse(content);
+    if (messageType === "text") {
+      const text = (parsed as { text?: unknown }).text;
+      return typeof text === "string" ? text : "";
+    }
+    if (messageType === "post") {
+      const localized = parsed as Record<string, unknown>;
+      const post =
+        localized.zh_cn ??
+        localized.en_us ??
+        (Array.isArray(localized.content) ? localized : Object.values(localized)[0]);
+      return postText(post);
+    }
+  } catch {
+    return "";
+  }
+  return messageType ? `[${messageType}]` : "";
+}

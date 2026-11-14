@@ -1,4 +1,7 @@
 import * as lark from "@larksuiteoapi/node-sdk";
+import { reportFailureAs } from "../util/errors.ts";
+import { feishuMessageText } from "./payloads.ts";
+export { feishuMessageText } from "./payloads.ts";
 
 export interface FeishuReaderChat {
   chatId: string;
@@ -40,40 +43,9 @@ export interface FeishuConversationsResult {
   conversations: FeishuConversation[];
 }
 
-const MAX_PAGES = 5;
+const MAX_PAGES = 100;
 
-function textOfPost(value: unknown): string {
-  const root = value as { title?: unknown; content?: unknown };
-  const lines: string[] = [];
-  if (typeof root?.title === "string" && root.title.trim()) lines.push(root.title.trim());
-  const rows = Array.isArray(root?.content) ? root.content : [];
-  for (const row of rows) {
-    if (!Array.isArray(row)) continue;
-    const parts: string[] = [];
-    for (const item of row) {
-      const tag = item as { tag?: unknown; text?: unknown };
-      if (typeof tag?.text === "string") parts.push(tag.text);
-    }
-    const line = parts.join("").trim();
-    if (line) lines.push(line);
-  }
-  return lines.join("\n");
-}
-
-export function feishuMessageText(msgType: string, content: string | undefined): string {
-  if (!content) return "";
-  try {
-    const parsed = JSON.parse(content) as unknown;
-    if (msgType === "text") {
-      const text = (parsed as { text?: unknown })?.text;
-      return typeof text === "string" ? text : "";
-    }
-    if (msgType === "post") return textOfPost(parsed);
-  } catch {
-    return "";
-  }
-  return `[${msgType}]`;
-}
+class FeishuReadOverflow extends Error {}
 
 function chatIsDirect(chat: { chat_mode?: string; chat_type?: string }): boolean {
   return chat.chat_mode === "p2p" || chat.chat_type === "p2p";
@@ -122,7 +94,8 @@ export function createFeishuUserReader(appId: string, appSecret: string, token: 
     async listMessages(chatId, since, until) {
       const out: FeishuReaderMessage[] = [];
       let pageToken: string | undefined;
-      for (let page = 0; page < MAX_PAGES; page++) {
+      for (let page = 0; ; page++) {
+        if (page >= MAX_PAGES) throw new FeishuReadOverflow(`more than ${MAX_PAGES * 50} messages in one chat`);
         const res = await client.im.v1.message.list(
           {
             params: {
@@ -148,7 +121,7 @@ export function createFeishuUserReader(appId: string, appSecret: string, token: 
             senderId,
             ...(message.sender?.sender_type ? { senderType: message.sender.sender_type } : {}),
             at: Number(message.create_time ?? 0),
-            text: feishuMessageText(message.msg_type ?? "", message.body?.content),
+            text: feishuMessageText(message.msg_type, message.body?.content),
             ...(threadId ? { threadId } : {}),
           });
         }
@@ -162,14 +135,16 @@ export function createFeishuUserReader(appId: string, appSecret: string, token: 
 
 export async function readFeishuConversations(
   reader: FeishuUserReader,
-  opts: { since: number; until: number; limit?: number },
+  opts: { since: number; until: number },
 ): Promise<FeishuConversationsResult> {
-  const [viewerOpenId, chats] = await Promise.all([reader.viewerOpenId().catch(() => undefined), reader.listChats()]);
+  const [viewerOpenId, chats] = await Promise.all([reader.viewerOpenId(), reader.listChats()]);
   const conversations: FeishuConversation[] = [];
-  for (const chat of chats.slice(0, opts.limit ?? 50)) {
+  for (const chat of chats) {
     const [members, messages] = await Promise.all([
-      reader.listMembers(chat.chatId).catch(() => []),
-      reader.listMessages(chat.chatId, opts.since, opts.until).catch(() => []),
+      reader
+        .listMembers(chat.chatId)
+        .catch(reportFailureAs(`feishu: read members ${chat.chatId}`, [] as FeishuReaderMember[])),
+      reader.listMessages(chat.chatId, opts.since, opts.until),
     ]);
     const names = new Map(members.map((member) => [member.id, member.name] as const));
     const human = messages.filter((message) => message.senderType !== "app");

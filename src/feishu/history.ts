@@ -2,6 +2,8 @@ import type { LarkChannel } from "@larksuiteoapi/node-sdk";
 import type { CachedMessage, ReadMessagesOpts } from "../surface-cache/types.ts";
 import type { ConversationTurn, OverheardMessage } from "../types.ts";
 import type { FeishuCore } from "./core.ts";
+import { feishuMessageText } from "./payloads.ts";
+import { reportFailureAs } from "../util/errors.ts";
 
 export interface FeishuHistoryRequest {
   chatId: string;
@@ -19,48 +21,6 @@ export interface FeishuHistory {
 
 export interface FeishuHistoryReader {
   read(request: FeishuHistoryRequest): Promise<FeishuHistory>;
-}
-
-function postText(value: unknown): string {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return "";
-  const post = value as { title?: unknown; content?: unknown };
-  const lines = Array.isArray(post.content) ? post.content : [];
-  const rendered = lines.map((line) => {
-    if (!Array.isArray(line)) return "";
-    return line
-      .map((node) => {
-        if (typeof node !== "object" || node === null) return "";
-        const n = node as Record<string, unknown>;
-        if (typeof n.text === "string") return n.text;
-        if (typeof n.user_name === "string") return `@${n.user_name}`;
-        if (typeof n.user_id === "string") return `@${n.user_id}`;
-        if (typeof n.emoji_type === "string") return `:${n.emoji_type}:`;
-        if (n.tag === "img") return "[image]";
-        if (n.tag === "media") return "[media]";
-        return "";
-      })
-      .join("");
-  });
-  return [typeof post.title === "string" ? post.title : "", ...rendered].filter((line) => line.trim()).join("\n");
-}
-
-function messageText(messageType: string | undefined, content: string | undefined): string {
-  if (!content) return "";
-  try {
-    const parsed: unknown = JSON.parse(content);
-    if (messageType === "text") {
-      const text = (parsed as { text?: unknown }).text;
-      return typeof text === "string" ? text : "";
-    }
-    if (messageType === "post") {
-      const localized = parsed as Record<string, unknown>;
-      const post = localized.zh_cn ?? localized.en_us ?? Object.values(localized)[0];
-      return postText(post);
-    }
-  } catch {
-    return "";
-  }
-  return "";
 }
 
 function toCachedMessage(
@@ -87,7 +47,7 @@ function toCachedMessage(
     ...(sub ? { sub } : {}),
     ...(item.sender?.id ? { authorId: item.sender.id } : {}),
     ...(item.sender?.sender_name ? { authorName: item.sender.sender_name } : {}),
-    text: messageText(item.msg_type, item.body?.content),
+    text: feishuMessageText(item.msg_type, item.body?.content),
     ...(self ? { self: true } : {}),
     ...(item.sender?.sender_type === "app" ? { bot: true } : {}),
     ...(item.deleted ? { deleted: true } : {}),
@@ -104,7 +64,7 @@ export function createFeishuHistoryReader(opts: {
     const read = opts.core.readSurfaceMessages;
     if (!read) return [];
     const base: ReadMessagesOpts = {
-      limit: (request.limit ?? 20) * 3,
+      limit: (request.limit ?? 200) * 3,
       oldestFirst: true,
       orderBy: "createdAt",
       noFallback: true,
@@ -130,7 +90,7 @@ export function createFeishuHistoryReader(opts: {
         container_id_type: "chat",
         container_id: request.chatId,
         sort_type: "ByCreateTimeDesc",
-        page_size: Math.min(50, (request.limit ?? 20) * 3),
+        page_size: Math.min(50, (request.limit ?? 200) * 3),
         with_sender_name: true,
       },
     });
@@ -150,13 +110,13 @@ export function createFeishuHistoryReader(opts: {
         try {
           const live = await readLive(request);
           if (live.length > messages.length) messages = live;
-        } catch {
-          void 0;
+        } catch (error) {
+          reportFailureAs("feishu: live history", undefined)(error);
         }
       }
       const visible = messages
         .filter((message) => message.ts !== request.beforeTs && (message.text.trim() || message.files?.length))
-        .slice(-(request.limit ?? 20));
+        .slice(-(request.limit ?? 200));
       return {
         priorTurns: visible.map((message) => ({
           role: message.self ? "assistant" : "user",

@@ -20,7 +20,7 @@ import { createFeishuCardHandler, createFeishuMessageHandler, type FeishuCardRes
 import type { FeishuCardAction } from "./payloads.ts";
 
 export type { FeishuPluginConfig } from "./config.ts";
-export { feishuAccountConfigsFromEnv, feishuPluginConfigFromEnv, parseFeishuDomain } from "./config.ts";
+export { feishuPluginConfigFromEnv, parseFeishuDomain } from "./config.ts";
 export { buildFeishuCard, type FeishuCardButton, type FeishuCardInput } from "./cards.ts";
 export {
   FEISHU_REF_PREFIX,
@@ -127,12 +127,13 @@ export interface FeishuSurface {
 export async function startFeishuSurface(opts: {
   config: FeishuPluginConfig;
   core: FeishuCore;
+  cardHandler?: (action: FeishuCardAction) => Promise<FeishuCardResponse | undefined>;
   leaderLease?: LeaderLease;
   pollIntervalMs?: number;
   directory?: DirectoryStore;
 }): Promise<FeishuSurface> {
   const channel = createFeishuChannel(opts.config);
-  const cardHandler = createFeishuCardHandler({ core: opts.core });
+  const cardHandler = opts.cardHandler ?? createFeishuCardHandler({ core: opts.core });
   const history = createFeishuHistoryReader({
     core: opts.core,
     channel,
@@ -149,6 +150,7 @@ export async function startFeishuSurface(opts: {
         client: channel.rawClient as unknown as FeishuClient,
         directory: opts.directory,
         botOpenId: () => channel.botIdentity?.openId,
+        ...(opts.leaderLease ? { leaderLease: opts.leaderLease } : {}),
       })
     : undefined;
   const plugin = await startFeishuPlugin(

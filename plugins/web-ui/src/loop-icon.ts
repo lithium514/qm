@@ -45,7 +45,8 @@ export function loopIcon(loop: { icon?: string; source?: string; sources?: strin
     /></span>`;
   }
   const source = loop.source ?? loop.sources?.[0];
-  const fallback = ({ gmail: "mail", slack: "slack" } as Record<string, string>)[source ?? ""] ?? "repeat";
+  const fallback =
+    ({ gmail: "mail", slack: "slack", feishu: "message" } as Record<string, string>)[source ?? ""] ?? "repeat";
   const choice =
     LOOP_ICONS.find((entry) => entry.id === (loop.icon ?? fallback)) ??
     LOOP_ICONS.find((entry) => entry.id === fallback)!;

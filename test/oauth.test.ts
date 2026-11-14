@@ -24,6 +24,8 @@ const env = {
   GOOGLE_OAUTH_CLIENT_SECRET: "gsecret",
   SLACK_OAUTH_CLIENT_ID: "sid",
   SLACK_OAUTH_CLIENT_SECRET: "ssecret",
+  FEISHU_APP_ID: "fid",
+  FEISHU_APP_SECRET: "fsecret",
   NOTION_OAUTH_CLIENT_ID: "nid",
   NOTION_OAUTH_CLIENT_SECRET: "nsecret",
   GITHUB_OAUTH_CLIENT_ID: "ghid",
@@ -567,4 +569,62 @@ test("oauth flow store — a short opaque state resolves once, then expires", as
   const stale = createOAuthFlowStore(testMap<OAuthState>(), { now: () => 1_000, ttlMs: 10 });
   const staleId = await stale.start({ provider: "x", principalId: "U1", redirectUri: "https://example.test/cb" }, 0);
   assert.equal(await stale.finish(staleId), null, "expired");
+});
+
+test("Feishu authorize URL uses comma-separated user scopes", async () => {
+  const client = await resolve("feishu", {});
+  const u = new URL(authorizeUrl("feishu", { redirectUri: "https://app/cb", state: "s", client }));
+  assert.equal(u.origin + u.pathname, PROVIDERS.feishu!.authUrl);
+  assert.equal(u.searchParams.get("client_id"), "fid");
+  assert.equal(u.searchParams.get("scope"), PROVIDERS.feishu!.scopes.join(" "));
+  assert.match(u.searchParams.get("scope") ?? "", /im:message.send_as_user/);
+});
+
+test("Feishu exchanges a code via JSON and keeps the refresh token", async () => {
+  const fetchImpl: FetchLike = async (u, init) => {
+    assert.equal(u, PROVIDERS.feishu!.tokenUrl);
+    assert.match(init.headers["content-type"] ?? "", /application\/json/);
+    const body = JSON.parse(init.body) as Record<string, string>;
+    assert.equal(body.grant_type, "authorization_code");
+    assert.equal(body.client_id, "fid");
+    assert.equal(body.client_secret, "fsecret");
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        code: 0,
+        access_token: "u",
+        refresh_token: "r",
+        expires_in: 7200,
+        scope: "im:message im:chat:readonly",
+      }),
+    };
+  };
+  const { hosts, token } = await exchangeCode("feishu", "c", "https://app/cb", {
+    client: await resolve("feishu", {}),
+    fetchImpl,
+    now: 1000,
+  });
+  assert.deepEqual(hosts, ["open.feishu.cn"]);
+  assert.equal(token.accessToken, "u");
+  assert.equal(token.refreshToken, "r");
+  assert.equal(token.expiresAt, 1000 + 7200 * 1000);
+  assert.deepEqual(token.grantedScopes, ["im:message", "im:chat:readonly"]);
+});
+
+test("Feishu refresh dispatches by host", async () => {
+  let hit = "";
+  const fetchImpl: FetchLike = async (u, init) => {
+    hit = u;
+    const body = JSON.parse(init.body) as Record<string, string>;
+    assert.equal(body.grant_type, "refresh_token");
+    assert.equal(body.refresh_token, "r");
+    return { ok: true, status: 200, json: async () => ({ access_token: "u2", expires_in: 3600 }) };
+  };
+  const refresh = makeRefresh({ resolveClient: resolve, fetchImpl, now: () => 2000 });
+  const token = await refresh("open.feishu.cn", { accessToken: "u", refreshToken: "r" }, {});
+  assert.equal(hit, PROVIDERS.feishu!.tokenUrl);
+  assert.equal(token.accessToken, "u2");
+  assert.equal(token.refreshToken, "r");
+  assert.equal(token.expiresAt, 2000 + 3600 * 1000);
 });

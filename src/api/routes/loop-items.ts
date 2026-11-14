@@ -23,6 +23,8 @@ import {
 } from "../../loops/inbox-loop.ts";
 import { THINKING_LEVELS } from "../../model/pi-models.ts";
 import { principalDestination } from "../../reach/reach.ts";
+import { readFeishuConversations } from "../../feishu/read.ts";
+import { reportFailure } from "../../util/errors.ts";
 
 const MAX_ITEMS_PER_INGEST = 50;
 const MAX_SOURCE_PAYLOAD_BYTES = 64_000;
@@ -360,8 +362,15 @@ async function actOnItem(ctx: ApiCtx): Promise<void> {
       if (current.proposal?.at !== item.proposal?.at) return draftChanged();
       item = current;
       const slackClient = ctx.deps.loopSlackClient;
+      const feishuClient = ctx.deps.loopFeishuClient;
       const result = await adapter.act(
-        { owner: loop.owner, actor: proposalAuthor, tokens, ...(slackClient ? { slackClient } : {}) },
+        {
+          owner: loop.owner,
+          actor: proposalAuthor,
+          tokens,
+          ...(slackClient ? { slackClient } : {}),
+          ...(feishuClient ? { feishuClient } : {}),
+        },
         item,
         kind,
         args,
@@ -610,7 +619,48 @@ function serializeItemAction(handler: (ctx: ApiCtx) => Promise<void>): (ctx: Api
   };
 }
 
+const FEISHU_READ_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
+const FEISHU_READ_MAX_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+async function feishuConversations(ctx: ApiCtx): Promise<void> {
+  const loaded = await loadAdministrable(ctx);
+  if (!loaded) return;
+  const { loop } = loaded;
+  if (!ctx.capability) {
+    return sendJson(ctx.res, 403, { error: "forbidden", message: "Feishu conversations are read by the agent" });
+  }
+  const tokens = ctx.deps.loopSourceTokens;
+  const readerFactory = ctx.deps.loopFeishuReader;
+  if (!tokens || !readerFactory) {
+    return sendJson(ctx.res, 501, { error: "not_configured", message: "Feishu user OAuth is not configured" });
+  }
+  const token =
+    (await tokens.connectorAccessToken("open.feishu.cn", loop.owner, "personal")) ??
+    (await tokens.connectorAccessToken("open.feishu.cn", loop.owner));
+  if (!token) {
+    return sendJson(ctx.res, 409, { error: "not_connected", message: "Feishu is not connected for this account" });
+  }
+  const until = Date.now();
+  const requested = Number(ctx.url.searchParams.get("since"));
+  const since = Number.isFinite(requested) && requested > 0 ? requested : until - FEISHU_READ_WINDOW_MS;
+  const clamped = since < until - FEISHU_READ_MAX_WINDOW_MS;
+  const windowStart = clamped ? until - FEISHU_READ_MAX_WINDOW_MS : since;
+  try {
+    const result = await readFeishuConversations(readerFactory(token), { since: windowStart, until });
+    sendJson(ctx.res, 200, {
+      since: windowStart,
+      until,
+      ...(clamped ? { requestedSince: since, clamped: true } : {}),
+      ...result,
+    });
+  } catch (err) {
+    reportFailure("feishu: read conversations", err, `loop=${loop.id}`);
+    sendJson(ctx.res, 502, { error: "upstream", message: errMessage(err) });
+  }
+}
+
 export const loopItemRoutes: ReadonlyArray<Route<ApiCtx>> = [
+  { method: "GET", path: "/v1/loops/:id/feishu/conversations", auth: "source", handle: feishuConversations },
   { method: "POST", path: "/v1/loops/inbox/sent-chat", auth: "source", handle: ensureSentChat },
   ...withActor("query.principalId", [
     { method: "GET", path: "/v1/loops/:id/items/:itemId/image", auth: "source", handle: serveItemImage },

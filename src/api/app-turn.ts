@@ -1,4 +1,5 @@
 import { externalSlackRequestAllowed } from "../resolution/external-slack.ts";
+import { surfaceCapabilities } from "../surfaces/capabilities.ts";
 import { turnModelRefusal } from "./runtime-config.ts";
 import type { Run } from "../runs/run-store.ts";
 import {
@@ -138,7 +139,7 @@ export function createTurnMethods(
   const methods: ReturnType<typeof createTurnMethods> = {
     async turn(req: TurnRequest, replay?: { signalDedupKey: string }): Promise<TurnResult> {
       const historicalSlack = Object.keys(deps.externalSlackPolicies ?? {}).length
-        ? (await deps.sessions.getByThread(req.conversation.threadRef))?.surface === "slack"
+        ? surfaceCapabilities((await deps.sessions.getByThread(req.conversation.threadRef))?.surface).externalSlack
         : false;
       if (!externalSlackRequestAllowed(req, deps.externalSlackPolicies, historicalSlack))
         return {

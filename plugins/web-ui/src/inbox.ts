@@ -56,7 +56,7 @@ import { icon } from "./icons";
 import { assistantSidebar, assistantMessage } from "./assistant-sidebar";
 import { inboxChat } from "./inbox-chat";
 
-export type InboxSource = "gmail" | "slack" | "generic";
+export type InboxSource = "gmail" | "slack" | "feishu" | "generic";
 
 export interface InboxDraft {
   to?: string[];
@@ -135,6 +135,14 @@ export interface InboxItem {
   thread: LedgerThreadMessage[];
   gmail?: { threadId: string; subject?: string; to?: string[]; cc?: string[] };
   slack?: { channelId: string; channelLabel?: string; ts: string; threadTs?: string; userId?: string };
+  feishu?: {
+    chatId: string;
+    chatLabel?: string;
+    messageId: string;
+    threadId?: string;
+    isDirectMessage: boolean;
+    userId?: string;
+  };
   sentAt?: number;
   dismissedAt?: number;
   repliedAt?: number;
@@ -163,9 +171,10 @@ export interface InboxSyncCron {
 }
 
 const DEFAULT_VIEWS: InboxView[] = [
-  { id: "all", name: "All", sources: ["gmail", "slack"] },
+  { id: "all", name: "All", sources: ["gmail", "slack", "feishu"] },
   { id: "gmail", name: "Email", sources: ["gmail"] },
   { id: "slack", name: "Slack", sources: ["slack"] },
+  { id: "feishu", name: "Feishu", sources: ["feishu"] },
   { id: "sent", name: "Sent", sources: [] },
 ];
 
@@ -349,7 +358,7 @@ export function resetInboxState(): void {
 
 export function inboxViews(): InboxView[] {
   return [
-    { id: "all", name: "All", sources: ["gmail", "slack", "generic"] },
+    { id: "all", name: "All", sources: ["gmail", "slack", "feishu", "generic"] },
     ...inboxState.selected.map((loop) => ({ id: loop.id, name: loop.name, sources: [] as InboxSource[] })),
   ];
 }
@@ -394,7 +403,8 @@ function draftOf(item: LedgerItem): InboxDraft | undefined {
 }
 
 function resolvedStatus(entry: LedgerItem): InboxItem["status"] {
-  if (entry.state === "actioned") return entry.source === "gmail" || entry.source === "slack" ? "sent" : "dismissed";
+  if (entry.state === "actioned")
+    return entry.source === "gmail" || entry.source === "slack" || entry.source === "feishu" ? "sent" : "dismissed";
   if (entry.state !== "dismissed") return "open";
   return entry.actionKind === "replied" ? "replied" : "dismissed";
 }
@@ -402,7 +412,8 @@ function resolvedStatus(entry: LedgerItem): InboxItem["status"] {
 export function toInboxItem(entry: LedgerItem): InboxItem {
   const payload = entry.sourcePayload;
   const sourceId = entry.source;
-  const source: InboxSource = sourceId === "gmail" || sourceId === "slack" ? sourceId : "generic";
+  const source: InboxSource =
+    sourceId === "gmail" || sourceId === "slack" || sourceId === "feishu" ? sourceId : "generic";
   const draft = draftOf(entry);
   const resolved = resolvedStatus(entry);
   const reactions = Array.isArray(payload.reactions) ? (payload.reactions as string[]) : undefined;
@@ -433,7 +444,7 @@ export function toInboxItem(entry: LedgerItem): InboxItem {
     sourceContextFetched: payload.sourceContextFetched === true,
     sourceContextPartial: payload.sourceContextPartial === true,
     ...(typeof payload.sourceRefreshError === "string" ? { sourceRefreshError: payload.sourceRefreshError } : {}),
-    ...(source === "slack" && Array.isArray(payload.participants)
+    ...((source === "slack" || source === "feishu") && Array.isArray(payload.participants)
       ? {
           participants: payload.participants.flatMap((person) =>
             person && typeof person.id === "string" && typeof person.name === "string"
@@ -450,6 +461,7 @@ export function toInboxItem(entry: LedgerItem): InboxItem {
     ...(entry.proposal?.sessionId ? { draftSessionId: entry.proposal.sessionId } : {}),
     ...(payload.gmail ? { gmail: payload.gmail as InboxItem["gmail"] } : {}),
     ...(payload.slack ? { slack: payload.slack as InboxItem["slack"] } : {}),
+    ...(payload.feishu ? { feishu: payload.feishu as InboxItem["feishu"] } : {}),
     ...(reactions?.length ? { reactions } : {}),
     ...(payload.probablyResolved === true ? { probablyResolved: true } : {}),
     ...(payload.automated === true ? { automated: true } : {}),
@@ -793,7 +805,9 @@ async function fetchLocalInboxItems(): Promise<InboxItem[]> {
         item !== null &&
         typeof (item as InboxItem).id === "string" &&
         typeof (item as InboxItem).sourceKey === "string" &&
-        ((item as InboxItem).source === "gmail" || (item as InboxItem).source === "slack"),
+        ((item as InboxItem).source === "gmail" ||
+          (item as InboxItem).source === "slack" ||
+          (item as InboxItem).source === "feishu"),
     );
   } catch {
     return [];
@@ -1355,9 +1369,13 @@ export function draftMessageTpl(item: InboxItem): TemplateResult | typeof nothin
   const busy = chatting.has(item.id);
   const draft = effectiveDraft(item);
   const gmail = item.source === "gmail";
+  const sourceLabel =
+    ({ gmail: "Gmail", slack: "Slack", feishu: "Feishu" } as Record<string, string>)[item.source] ?? "source";
+  const draftClass =
+    ({ gmail: "email", slack: "slack", feishu: "feishu" } as Record<string, string>)[item.source] ?? "slack";
   const showCc = gmail && ((draft.cc?.length ?? 0) > 0 || (item.gmail?.cc?.length ?? 0) > 0);
   return html`
-    <div class="inbox-draft ${gmail ? "email" : "slack"}">
+    <div class="inbox-draft ${draftClass}">
       <div class="inbox-draft-head">
         <span class="inbox-draft-label">Draft reply</span>
         ${
@@ -1375,7 +1393,7 @@ export function draftMessageTpl(item: InboxItem): TemplateResult | typeof nothin
         ${
           item.externalUrl
             ? html`<a class="inbox-external-link" href=${item.externalUrl} target="_blank" rel="noreferrer noopener">
-                ${icon(ArrowUpRight, 12)}<span>Open in ${gmail ? "Gmail" : "Slack"}</span>
+                ${icon(ArrowUpRight, 12)}<span>Open in ${sourceLabel}</span>
               </a>`
             : nothing
         }
@@ -1478,7 +1496,7 @@ export function handledNoteTpl(item: InboxItem): TemplateResult {
     </div>`;
   }
   if (item.status === "replied") {
-    const where = item.source === "slack" ? "Slack" : "Gmail";
+    const where = ({ slack: "Slack", feishu: "Feishu" } as Record<string, string>)[item.source] ?? "Gmail";
     return html`<div class="inbox-handled-note inbox-replied-note">
       <div class="inbox-handled-line">
         ${icon(CheckCheck, 13)}<span>You replied in ${where} ${item.repliedAt ? relTime(item.repliedAt) : ""}</span>
@@ -1643,10 +1661,12 @@ function itemRowTpl(surface: InboxSurface, item: InboxItem, groupSize = 1): Temp
   const handled = item.status !== "open";
   const gmail = item.source === "gmail";
   const slack = item.source === "slack";
-  const senderId = item.slack?.userId ?? item.participants?.[0]?.key;
+  const feishu = item.source === "feishu";
+  const directUserId = slack ? item.slack?.userId : item.feishu?.userId;
+  const senderId = directUserId ?? item.participants?.[0]?.key;
   const sender = item.participants?.find((person) => person.key === senderId) ?? {
     key: senderId ?? participantKey(item.from),
-    name: participantName(item.from) || "Slack",
+    name: participantName(item.from) || (feishu ? "Feishu" : "Slack"),
   };
   const heading = gmail ? item.from || item.title : (item.slack?.channelLabel ?? item.title);
   const sub = gmail ? item.title : item.from || inboxViewName(item.loopId);

@@ -20,6 +20,7 @@ import { isVisible } from "../directory/visibility.ts";
 import { pickMatch, type DirectoryMember } from "../directory/directory-store.ts";
 import { externalMemberActive } from "../identity/external-members.ts";
 import { hasRevisionEvents, recordMessageRevisions } from "../slack/message-revisions.ts";
+import { surfaceCapabilities } from "../surfaces/capabilities.ts";
 import { answerWebContextRequest } from "./web-context.ts";
 import { availableRuntimeError, validateRuntimeChoice } from "./runtime-config.ts";
 import { assertCronRuntime } from "../cron/runtime.ts";
@@ -326,13 +327,15 @@ export function createMessagingMethods(
       if (!deps.surfaceCache || !events.length) return { upserted: 0 };
       if (self && (self.name || self.mentionId)) ambientSelf.set(`${orgIdOf()}:${surface}`, self);
       const out = await deps.surfaceCache.ingest(events);
-      if (surface === "slack" && hasRevisionEvents(events)) {
+      if (surfaceCapabilities(surface).historyRevisions && hasRevisionEvents(events)) {
         void recordMessageRevisions(deps.sessions, deps.runs, events).catch(
           reportFailureAs("revisions: surface revision record", undefined),
         );
       }
-      for (const container of new Set(events.filter((e) => !e.self).map((e) => e.container))) {
-        void judgeAmbientContainer(surface, container).catch(reportFailureAs("ambient: judge", undefined));
+      if (surfaceCapabilities(surface).ambientJudge) {
+        for (const container of new Set(events.filter((e) => !e.self).map((e) => e.container))) {
+          void judgeAmbientContainer(surface, container).catch(reportFailureAs("ambient: judge", undefined));
+        }
       }
       return out;
     },

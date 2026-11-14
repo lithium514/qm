@@ -30,6 +30,9 @@
     "test:root:shard:check": "node scripts/run-root-test-shard.mjs --check --shards 5",
     "test:e2e": "node --test test/e2e/*.test.ts",
     "live-e2e": "node test/live-slack/run.ts",
+    "feishu-login": "node --env-file-if-exists=.env scripts/feishu-login.ts",
+    "feishu-doctor": "node --env-file-if-exists=.env scripts/feishu-doctor.ts",
+    "feishu-configure": "node --env-file-if-exists=.env scripts/feishu-configure.ts",
     "gallery:shots": "node test/live-slack/screenshots.ts",
     "gallery:shots:login": "node test/live-slack/screenshots.ts --login",
     "test:all": "node scripts/run-pg-tests.mjs test/*.test.ts test/*/*.test.ts",
@@ -79,6 +82,7 @@
     "@fly/sprites": "0.2.3",
     "@grpc/grpc-js": "^1.14.5",
     "@grpc/proto-loader": "^0.8.1",
+    "@larksuiteoapi/node-sdk": "^1.76.0",
     "@modelcontextprotocol/sdk": "1.32.1",
     "@renderinc/sdk": "1.6.0",
     "@sentry/node": "10.75.0",
@@ -111,8 +115,8 @@
     "zod": "4.6.7"
   },
   "overrides": {
-    "@hono/node-server": "2.1.5",
-    "hono": "4.13.13",
+    "@hono/node-server": "2.1.8",
+    "hono": "4.13.18",
     "@fastify/ajv-compiler": {
       "fast-uri": "3.1.9"
     },

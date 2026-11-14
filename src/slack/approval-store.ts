@@ -18,11 +18,22 @@ export function createApprovalStore(
   deliveries: Pick<DeliveryStore, "enqueue">,
 ) {
   async function deliver(id: string, record: PendingApprovalRecord): Promise<void> {
-    if (record.request?.surface !== "slack") return;
-    const actorId = approvalDeliveryRecipient(record.request.actor);
+    const request = record.request;
+    if (!request) return;
+    const actorId = approvalDeliveryRecipient(request.actor);
     if (!actorId) return;
-    const origin = record.request.surfaceOrigin;
-    const threadTs = record.request.conversation?.kind === "dm" ? origin?.replyThread : undefined;
+    if (request.surface === "feishu") {
+      if (!request.deliveryTarget) return;
+      await deliveries.enqueue({
+        destination: { type: "feishu", target: request.deliveryTarget, commandApprovalId: id },
+        text: `Approval needed: ${record.summary ?? record.command}`,
+        idempotencyKey: approvalDeliveryKey(id, record),
+      });
+      return;
+    }
+    if (request.surface !== "slack") return;
+    const origin = request.surfaceOrigin;
+    const threadTs = request.conversation?.kind === "dm" ? origin?.replyThread : undefined;
     await deliveries.enqueue({
       destination: {
         ...principalDestination(actorId, actorId),

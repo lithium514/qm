@@ -93,6 +93,7 @@ export interface ReadMessagesOpts extends SurfaceKey {
   before?: string;
   includeDeleted?: boolean;
   noFallback?: boolean;
+  orderBy?: "ts" | "createdAt";
   self?: boolean;
 }
 

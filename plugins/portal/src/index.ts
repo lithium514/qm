@@ -1115,6 +1115,16 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     return json(res, 400, { error: "bad_request", message: "illegal path" });
   }
 
+  if (pathname === "/feishu/card" && method === "POST") {
+    return proxyToUpstream(req, res, { baseUrl: CORE, path: pathname, search: "" }, [
+      "content-type",
+      "content-length",
+      "x-lark-request-timestamp",
+      "x-lark-request-nonce",
+      "x-lark-signature",
+    ]);
+  }
+
   if (
     (pathname === "/v1/slack/managed/installation" && (method === "POST" || method === "DELETE")) ||
     (pathname === "/v1/slack/managed/events" && method === "POST")

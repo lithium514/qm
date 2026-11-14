@@ -11,12 +11,19 @@ export interface SlackUserClient {
   reactions: { add(args: { channel: string; timestamp: string; name: string }): Promise<unknown> };
 }
 
+export interface FeishuUserClient {
+  send(chatId: string, text: string): Promise<void>;
+  reply(messageId: string, text: string): Promise<void>;
+  react(messageId: string, emoji: string): Promise<void>;
+}
+
 export interface SourceActionDeps {
   owner: string;
   actor?: "human" | "agent";
   tokens: ConnectorTokenSource;
   fetchImpl?: typeof fetch;
   slackClient?: (token: string) => SlackUserClient;
+  feishuClient?: (token: string) => FeishuUserClient;
 }
 
 export type SourceActionResult =
@@ -31,6 +38,7 @@ export interface ConversationEvent {
   at: number;
   text?: string;
   senderEmail?: string;
+  senderId?: string;
 }
 
 export interface ParsedEntry {

@@ -259,6 +259,7 @@ import { isolationBrief } from "../sessions/child-isolation.ts";
 import type { EgressPolicy } from "../types.ts";
 import { isOpenScopeMember } from "../resolution/sharing-access.ts";
 import { createSurfaceToolDeps, type SpineState } from "../surfaces/surface-tools.ts";
+import { surfaceCapabilities } from "../surfaces/capabilities.ts";
 import { createAttachStaging } from "./orchestrator/attach-tool.ts";
 import { reconcileMessageRevisions, revisionAnchorAt } from "../slack/message-revisions.ts";
 import { type ProviderKeys } from "../model/model-runtime.ts";
@@ -485,12 +486,13 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     },
 
     async handleTurn(input: OrchestratorInput): Promise<TurnResult> {
+      const caps = surfaceCapabilities(input.surface);
       if (
         !externalSlackRequestAllowed(
           { ...input, surface: input.surface ?? "" },
           deps.externalSlackPolicies,
           Object.keys(deps.externalSlackPolicies ?? {}).length > 0 &&
-            (await deps.sessions.getByThread(input.conversation.threadRef))?.surface === "slack",
+            surfaceCapabilities((await deps.sessions.getByThread(input.conversation.threadRef))?.surface).externalSlack,
         )
       )
         return { status: "refused", reason: "Slack workspace access changed; start a fresh request in Slack." };
@@ -631,10 +633,17 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       });
       if (!(await managedRosterIsCurrent())) return rosterChanged();
       const surface = input.surface ? deps.surfaces.get(input.surface) : undefined;
+      const capabilities = surface?.capabilities ?? {
+        mirrored: caps.historyRevisions,
+        liveReplies: caps.replyEngagement,
+        nativeActor: caps.actingUserId,
+        externalParticipants: caps.externalAudience,
+        textOnly: false,
+      };
       if (conversation.kind !== "dm" && !deps.identity.audienceIsAllInternal(conversation.audience)) {
         const externalAllowed =
           external ||
-          (surface?.capabilities.externalParticipants &&
+          (capabilities.externalParticipants &&
             (deps.config ? await deps.config.getExternalSlackParticipantsDurable(toScopeId("org", orgId())) : false));
         if (!externalAllowed) {
           return {
@@ -994,18 +1003,21 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       });
       const { sharingSources, memoryScopeId, baseRecallScopes, memoryAccess } = context;
       resolution.grantedHandles = context.listFiles();
-      const isWeb = input.surface === "web";
-      const surfaceTool = input.surface ?? "slack";
+      const isWeb = caps.id === "web";
+      const surfaceTool = caps.id === "feishu" ? caps.toolName : input.surface || "slack";
       const surfaceHints = surface?.promptHints;
       const automationDestination = input.origin.kind === "automation" ? input.origin.destination?.type : undefined;
       const surfaceName =
         automationDestination === undefined
-          ? (input.surface ?? "slack")
+          ? input.surface || "slack"
           : (deps.surfaces.get(automationDestination)?.kind ?? "slack");
       const toolSurface = deps.surfaces.get(surfaceName || "slack");
       const branding = await resolveBranding(deps.config, resolution.orgScopeId, deps.brandingDefault);
       const botName = branding.selfLabel ?? "QM";
       const orgName = branding.orgName ?? "this organization";
+      let surfaceLabel = "Slack";
+      if (isWeb) surfaceLabel = `the ${botName} web app`;
+      else if (input.surface) surfaceLabel = toolSurface?.label ?? (caps.id === "feishu" ? caps.label : "Slack");
       const rawHandle = cleanBrandingLabel(input.gatewayContext?.botHandle?.replace(/^@/, ""), 40);
       const botHandle = rawHandle && rawHandle.toLowerCase() !== botName.toLowerCase() ? rawHandle : undefined;
       let modeName = "mode-fallback";
@@ -1018,7 +1030,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       const frameVars: PromptVars = {
         botName,
         surfaceTool,
-        surfaceLabel: isWeb ? `the ${botName} web app` : (toolSurface?.label ?? "Slack"),
+        surfaceLabel,
         conversationType: { dm: "private 1:1", group: "group conversation", channel: "channel conversation" }[
           conversation.kind
         ],
@@ -1969,7 +1981,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         ...(input.runLeaseToken ? { runLeaseToken: input.runLeaseToken } : {}),
       };
       if (!ambientTurn) assignSessionTitle();
-      const trackRevisions = Boolean(surface?.capabilities.mirrored && deps.surfaceCache);
+      const trackRevisions = Boolean(capabilities.mirrored && deps.surfaceCache);
       const revisionAnchor = trackRevisions ? await revisionAnchorAt(deps.sessions, session.id) : undefined;
       const catchUpMessageRevisions = async (): Promise<void> => {
         if (!trackRevisions || !deps.surfaceCache) return;
@@ -2023,6 +2035,27 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         void earlyRecall?.catch(() => undefined);
         const [memoryWindow, memoryView] = await Promise.all([contextWindow, snapshot]);
         let historyAppended = input.approval !== undefined;
+        let approvalAlreadyApplied = false;
+        if (input.approval) {
+          const unresolved = await pending.get(input.approval.requestId);
+          if (!unresolved) {
+            const resolved = (await deps.sessions.getItems(session.id)).findLast(
+              (item) =>
+                item.kind === "ElicitationResponse" &&
+                item.elicitId === input.approval!.requestId &&
+                item.approved === input.approval!.approved,
+            );
+            const payload = resolved?.body as
+              { approved?: boolean; scope?: string; command?: string; approvalKey?: string } | undefined;
+            if (payload?.approved) {
+              approvalAlreadyApplied = true;
+              const uses = payload.scope === "once" ? 1 : Infinity;
+              if (payload.approvalKey)
+                commandUses.set(payload.approvalKey, (commandUses.get(payload.approvalKey) ?? 0) + uses);
+              if (payload.command) commandUses.set(payload.command, (commandUses.get(payload.command) ?? 0) + uses);
+            }
+          }
+        }
         const captureDependencies = () => [
           ...memoryView.facts,
           ...(!memoryView.complete ||
@@ -2130,7 +2163,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         }
         const recovered = !!input.approval && earlier?.decided.has(input.approval.requestId) === true;
         if (earlier?.unstarted.length || recovered) turnEvents.push(APPROVED_CALL_RAN_NOTE);
-        if (input.approval && !recovered) {
+        if (input.approval && !approvalAlreadyApplied && !recovered) {
           const p = await pending.get(input.approval.requestId);
           const decision = input.approval.approved ? "approve" : "deny";
           const refusal = approvalRefusal(p, session.id, actor.id);
@@ -2470,7 +2503,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         if (ambientTurn) assignSessionTitle();
 
         if (input.runId) {
-          if ((surface?.capabilities.liveReplies || input.surface === "monitor") && input.runLeaseToken) {
+          if ((capabilities.liveReplies || input.surface === "monitor") && input.runLeaseToken) {
             await deps.runs
               ?.setDeliveryState(input.runId, input.runLeaseToken, { replying: true })
               .catch(swallowAs("orchestrator: persist reply engagement", false));
@@ -2593,7 +2626,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             sourceSessionId: session.id,
           });
         const earlyTaskAck =
-          surface?.capabilities.liveReplies === true &&
+          caps.earlyAck &&
           humanInput &&
           conversation.kind === "dm" &&
           !input.approval &&
@@ -2773,7 +2806,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           memoryScopeId,
           ...(memoryAccess ? { memoryAccess } : {}),
           ...(!external && deps.mcp ? { mcp: deps.mcp, scopeId, actAsActor } : {}),
-          ...(surface?.capabilities.nativeActor ? { actingSlackUserId: actor.id } : {}),
+          ...(capabilities.nativeActor ? { actingSlackUserId: actor.id } : {}),
           ...(deps.deploymentLayer
             ? {
                 layerAuth: {
@@ -3845,7 +3878,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
 
         const stagedAttachments = attachStaging.staged();
         const harvestedAck = (() => {
-          if (!surface?.capabilities.liveReplies || input.surfaceTools || !input.runId) return undefined;
+          if (!caps.harvestedAck || input.surfaceTools || !input.runId) return undefined;
           const fb = deps.turnStream?.firstBlock(input.runId);
           const text = fb?.text.trim();
           return fb?.closed && text ? text : undefined;

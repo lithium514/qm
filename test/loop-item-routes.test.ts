@@ -632,7 +632,7 @@ test("sync-cron is created once, refreshes stale task text, and disables on requ
   assert.equal(after.id, syncCron.id);
   assert.equal(w.crons.get(syncCron.id)!.action, current);
   assert.equal(after.enabled, true);
-  assert.equal(w.crons.size, 2);
+  assert.equal(w.crons.size, 3);
   const disabled = await call(w, { method: "POST", path: "/v1/loops/inbox/sync-cron", body: { enabled: false } });
   assert.equal((disabled.body as { syncCron: { enabled: boolean } }).syncCron.enabled, false);
 });

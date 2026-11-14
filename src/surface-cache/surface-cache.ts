@@ -157,6 +157,13 @@ export function createPostgresSurfaceCache(
       ],
     },
     {
+      id: "surface-cache/store/0010-created",
+      statements: [
+        `CREATE INDEX CONCURRENTLY IF NOT EXISTS channel_messages_by_created
+            ON channel_messages(org_id, surface, account, container, created_at)`,
+      ],
+    },
+    {
       id: "surface-cache/store/0011-source",
       statements: [`ALTER TABLE channel_state ADD COLUMN IF NOT EXISTS source JSONB`],
     },
@@ -283,10 +290,16 @@ export function createPostgresSurfaceCache(
             `INSERT INTO channel_state(org_id, container, last_ts, oldest_ts, name, kind, members, updated_at, surface, account, source)
              VALUES ($1,$2,$3,$3,$4,$5,$6::jsonb,$7,$8,$9,$10::jsonb)
              ON CONFLICT (org_id, surface, account, container) DO UPDATE SET
-               last_ts = GREATEST(channel_state.last_ts, EXCLUDED.last_ts),
+               last_ts = CASE
+                 WHEN channel_state.surface = 'slack' AND EXCLUDED.surface = 'slack'
+                 THEN GREATEST(channel_state.last_ts::numeric, EXCLUDED.last_ts::numeric)::text
+                 ELSE GREATEST(channel_state.last_ts, EXCLUDED.last_ts) END,
                oldest_ts = CASE
-                 WHEN channel_state.oldest_ts IS NULL OR EXCLUDED.oldest_ts::numeric < channel_state.oldest_ts::numeric
-                 THEN EXCLUDED.oldest_ts ELSE channel_state.oldest_ts END,
+                 WHEN channel_state.oldest_ts IS NULL THEN EXCLUDED.oldest_ts
+                 WHEN channel_state.surface = 'slack' AND EXCLUDED.surface = 'slack'
+                 THEN LEAST(channel_state.oldest_ts::numeric, EXCLUDED.oldest_ts::numeric)::text
+                 WHEN EXCLUDED.oldest_ts < channel_state.oldest_ts THEN EXCLUDED.oldest_ts
+                 ELSE channel_state.oldest_ts END,
                name = COALESCE(EXCLUDED.name, channel_state.name),
                kind = COALESCE(EXCLUDED.kind, channel_state.kind),
                members = CASE WHEN EXCLUDED.members = '[]'::jsonb THEN channel_state.members ELSE EXCLUDED.members END,
@@ -321,6 +334,7 @@ export function createPostgresSurfaceCache(
 
     async readMessages(container, opts = {}) {
       const limit = clampLimit(opts.limit, DEFAULT_READ_LIMIT);
+      const orderBy = opts.orderBy === "createdAt" ? "created_at" : "ts";
       const conds = ["org_id = $1", "container = $2", "surface = $3", "account = $4"];
       const args: unknown[] = [orgId, container, ...keyOf(opts)];
       if (opts.at) {
@@ -359,7 +373,7 @@ export function createPostgresSurfaceCache(
       }
       args.push(limit);
       const rows = await q(
-        `SELECT ${MESSAGE_COLUMNS}, (SELECT COUNT(*) FROM channel_messages replies WHERE replies.org_id = channel_messages.org_id AND replies.surface = channel_messages.surface AND replies.account = channel_messages.account AND replies.container = channel_messages.container AND replies.sub = channel_messages.ts AND replies.ts <> channel_messages.ts AND replies.deleted = FALSE) AS reply_count, (SELECT json_agg(json_build_object('fileId', f.file_id, 'name', f.name, 'mimetype', f.mimetype, 'title', f.title, 'size', f.size)) FROM channel_files f WHERE f.org_id = channel_messages.org_id AND f.surface = channel_messages.surface AND f.account = channel_messages.account AND f.container = channel_messages.container AND f.ts = channel_messages.ts) AS files FROM channel_messages WHERE ${conds.join(" AND ")} ORDER BY ts ${opts.oldestFirst ? "ASC" : "DESC"} LIMIT $${args.length}`,
+        `SELECT ${MESSAGE_COLUMNS}, (SELECT COUNT(*) FROM channel_messages replies WHERE replies.org_id = channel_messages.org_id AND replies.surface = channel_messages.surface AND replies.account = channel_messages.account AND replies.container = channel_messages.container AND replies.sub = channel_messages.ts AND replies.ts <> channel_messages.ts AND replies.deleted = FALSE) AS reply_count, (SELECT json_agg(json_build_object('fileId', f.file_id, 'name', f.name, 'mimetype', f.mimetype, 'title', f.title, 'size', f.size)) FROM channel_files f WHERE f.org_id = channel_messages.org_id AND f.surface = channel_messages.surface AND f.account = channel_messages.account AND f.container = channel_messages.container AND f.ts = channel_messages.ts) AS files FROM channel_messages WHERE ${conds.join(" AND ")} ORDER BY ${orderBy} ${opts.oldestFirst ? "ASC" : "DESC"} LIMIT $${args.length}`,
         args,
       );
       const hit = rows.map(rowToMessage);

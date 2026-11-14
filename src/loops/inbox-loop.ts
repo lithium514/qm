@@ -56,6 +56,21 @@ const SOURCE_TEXT = {
     draft: "{body}",
     images: "url_private; up to 4",
   },
+  feishu: {
+    loopName: "Feishu",
+    name: "Feishu",
+    waiting: "every Feishu message",
+    reread: "regardless of the scan window, age, or read/unread state",
+    owner: "their own Feishu open_id, returned as viewerOpenId",
+    ignore: "",
+    scan: "Use the Feishu user connection and the conversations endpoint described above.",
+    title: "chat label",
+    fromDetail: "Feishu open_id",
+    voice:
+      "Draft the reply in the user's own voice: match how the user actually writes in Feishu (check their recent messages: register, length, punctuation).",
+    draft: "{body}",
+    images: "https URLs when available; up to 4",
+  },
 } as const;
 
 export const INBOX_PRECHECK_QUERIES = {
@@ -93,6 +108,11 @@ function scanWindow(name: string, since?: number): string {
   return `${window} Keep no watermark on disk; computers are replaced without notice, and this window is supplied every pass.`;
 }
 
+function feishuScan(loopId: string, since?: number): string {
+  const query = since ? `?since=${since}` : "";
+  return `Use the Feishu user connection: GET $AGENT_API_URL/v1/loops/${loopId}/feishu/conversations${query} with the agent capability header. The response carries viewerOpenId and conversations, each with chatId, chatLabel, isDirectMessage and messages (messageId, senderId, senderName, at, text, threadId). If the response says \`clamped: true\`, scan only the returned window; if it says \`overflowChats\`, say so in the scan result rather than pretending the list was complete. Unanswered p2p and group messages and @mentions addressed to the user are candidates. ONE ITEM PER CONVERSATION, never per message. sourceKey = chatId alone for a p2p; chatId:threadId for a group, where threadId is the root id carried by the latest waiting message (use the message id for an unthreaded group message). Record feishu metadata: chatId, chatLabel, messageId (the LATEST waiting message), threadId (the root for a group item; omit for a p2p), isDirectMessage, and userId (the sender's open_id). A message whose senderId equals viewerOpenId is the person's own reply, so treat it as author "owner" when reconciling.`;
+}
+
 export function renderSourceInboxTask(loopId: string, source: string, context: InboxTaskContext = {}): string {
   const key = source as keyof typeof SOURCE_TEXT;
   const text = SOURCE_TEXT[key];
@@ -102,7 +122,7 @@ export function renderSourceInboxTask(loopId: string, source: string, context: I
 1. GET $AGENT_API_URL/v1/loops/${loopId}/items (agent capability header) — note existing items: skip complete items already tracked; a newer message in a tracked conversation is reported as an event (below), never re-posted or redrafted here. Preserve human-edited drafts. Repair incomplete open items first: an existing dedupeKey with missing sourcePayload, title, snippet, source metadata, or proposal is unfinished work, not a reason to skip it. Re-read its original conversation using the dedupeKey and summary, then ingest the complete item and draft under that same dedupeKey even when no newer message arrived. Never invent message content from a summary; if the source is unavailable, leave the item pending for retry.
    - Closed-loop detection: BEFORE scanning for new items, re-read the exact source conversation of EVERY unresolved item (held, pending, processed, or failed), ${text.reread}. The scan window is NOT a reconciliation window. Whenever the LATEST message in that conversation is newer than the item's sourceAt, report it as an event and let the Loop decide: POST $AGENT_API_URL/v1/loops/${loopId}/events with {"events":[{"sourceKey":"<item sourceKey>","author":"owner"|"other","at":<message timestamp in ms>,"text":"<the message, <=${EVENT_TEXT_CHARS} chars>","from":"<sender name, for other>"}]} (up to 20 events per call). author is "owner" when the user wrote it themselves (${text.owner}), else "other". ${text.ignore}Never resolve, dismiss, or redraft these items yourself: the event is judged by the Loop, which closes answered conversations and redrafts reopened ones. If a source read fails or is incomplete, retain the item and retry later; do not treat it as resolved.
 2. ${scanWindow(text.name, context.since)} If ${text.name} is not connected, finish silently. Judge "waiting on a reply" like a good chief of staff, with a deliberate asymmetry: (a) NEEDS REPLY: direct questions, requests, intros, and personal messages that expect acknowledgment; when in any doubt, this bucket. (b) PROBABLY RESOLVED: the transcript reads closed (a thanks, a "sounds good", a thread someone else already answered) but a reasonable person might still send a word; post the item anyway with "probablyResolved": true in the item body and a draft included; the UI shows these in a muted section. NEVER silently drop a human conversation you judged resolved; demote it instead. (c) SKIP entirely: only unmistakable machine noise (newsletters, receipts, calendar notices, bot chatter). Human words never skip; the lowest they go is probablyResolved.
-   - ${text.scan}
+   - ${key === "feishu" ? feishuScan(loopId, context.since) : text.scan}
 3. For each new or refreshed item, investigate before drafting: read the whole thread, and check whatever context makes the reply substantive (calendar for scheduling asks, earlier ${text.name} history for open questions). ${renderVoiceBrief(key, context.voiceProfile)}
    Punctuation hard rule: never use em dashes or en dashes in a draft; use a comma, period, or "..." instead, and re-read every draft before posting to strip any that slipped in.
 4. POST $AGENT_API_URL/v1/loops/${loopId}/items with {"items": [...]}. Each item: source ("${source}"), sourceKey, title (${text.title}), from (display name), fromDetail (${text.fromDetail}), snippet (the full text of the waiting message, never shortened or ellipsized), context (up to 6 prior thread messages as {author, at, text}), receivedAt (ms epoch of the waiting message), externalUrl (deep link to the original in ${text.name}), draft (${text.draft}), and the ${source} metadata block from step 2. IMAGES: when a thread message carries image attachments, include an "images" array of their https URLs (${text.images}) on the matching context entry, and on the item itself for the waiting message — the UI proxies and renders them inline as the user's own eyes would see them in ${text.name}.
@@ -175,7 +195,7 @@ export function isReplyLoop(loop: Loop, item: LoopItem): boolean {
 }
 
 export const REPLY_DECISION = [
-  'First decide whether the person still owes a reply in this conversation. sourcePayload.latestEvent, when present, is the newest message an event saw: author "owner" means the person wrote it themselves (in Gmail, Slack, or from QM).',
+  'First decide whether the person still owes a reply in this conversation. sourcePayload.latestEvent, when present, is the newest message an event saw: author "owner" means the person wrote it themselves (in Gmail, Slack, Feishu, or from QM).',
   'If the person has already answered and nothing newer asks anything of them, end with {"resolution":{"kind":"replied","reason":"<one line>"}}. If the conversation needs nothing from them (closed out, a plain thanks, someone else answered, machine noise), end with {"resolution":{"kind":"no_reply_needed","reason":"<one line>"}}. Re-read the conversation from the source when the payload is not enough to tell. When in doubt, draft a reply.',
 ].join("\n");
 

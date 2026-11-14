@@ -1,9 +1,10 @@
 import type { LoopItem } from "../types.ts";
 import { gmailAdapter } from "./gmail.ts";
+import { feishuAdapter } from "./feishu.ts";
 import { slackAdapter } from "./slack.ts";
 import type { LoopSourceAdapter } from "./adapter.ts";
 
-const SOURCE_ADAPTERS: readonly LoopSourceAdapter[] = [gmailAdapter, slackAdapter];
+const SOURCE_ADAPTERS: readonly LoopSourceAdapter[] = [gmailAdapter, slackAdapter, feishuAdapter];
 
 export function sourceAdapter(id: unknown): LoopSourceAdapter | undefined {
   return typeof id === "string" ? SOURCE_ADAPTERS.find((adapter) => adapter.id === id) : undefined;

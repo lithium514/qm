@@ -7,13 +7,16 @@ import type { Config } from "./config.ts";
 import { buildApp, serverDeps } from "./wiring.ts";
 import { createServer } from "./api/server.ts";
 import { dockerDaemonFailure } from "./deploy/docker-deploy-provider.ts";
-import { errMessage, reportFailureAs } from "./util/errors.ts";
+import { errMessage, reportFailure, reportFailureAs } from "./util/errors.ts";
 import { sleep } from "./util/async.ts";
 import { slackAccountConfigsFromEnv, slackPluginConfigFromEnv, startSlackPlugin } from "./slack/index.ts";
 import { createSlackRuntimeReconciler } from "./surfaces/slack-runtime.ts";
 import { migrateRegisteredPgSchemas } from "./persistence/pg-pool.ts";
 import { sessionLifetime } from "../plugins/portal/src/session.ts";
 import { startFrontDoor } from "./web/front-door.ts";
+import { createFeishuCore, feishuPluginConfigFromEnv, startFeishuSurface, type FeishuSurface } from "./feishu/index.ts";
+import type { FeishuCardEndpoint } from "./feishu/http.ts";
+import { createFeishuCardHandler } from "./feishu/handler.ts";
 
 export async function startQm(
   config: Config,
@@ -26,6 +29,28 @@ export async function startQm(
   let slackEnvironmentState: "absent" | "configured" | "partial" =
     env.SLACK_BOT_TOKEN || env.SLACK_APP_TOKEN ? "partial" : "absent";
   if (slackConfig) slackEnvironmentState = "configured";
+  const feishuConfig = feishuPluginConfigFromEnv(env);
+  let feishuSurface: FeishuSurface | undefined;
+  const feishuCore = feishuConfig
+    ? createFeishuCore(
+        built.app,
+        built.blobTransfer,
+        built.sessions,
+        built.keychainApprovals,
+        built.identity,
+        built.directory,
+        built.inboxEvent,
+      )
+    : undefined;
+  const feishuCardHandler = feishuCore ? createFeishuCardHandler({ core: feishuCore }) : undefined;
+  const feishuCard: FeishuCardEndpoint | undefined =
+    feishuConfig && feishuCardHandler && (feishuConfig.verificationToken || feishuConfig.encryptKey)
+      ? {
+          ...(feishuConfig.verificationToken ? { verificationToken: feishuConfig.verificationToken } : {}),
+          ...(feishuConfig.encryptKey ? { encryptKey: feishuConfig.encryptKey } : {}),
+          handle: (action) => feishuCardHandler(action),
+        }
+      : undefined;
   const managedSlack = env.QM_SLACK_SERVICE_URL
     ? createManagedSlack({
         serviceUrl: env.QM_SLACK_SERVICE_URL,
@@ -37,7 +62,7 @@ export async function startQm(
     : undefined;
   const draining = new AbortController();
   const server = createServer(built.app, {
-    ...serverDeps(config, built, slackEnvironmentState, slackConfig?.botToken),
+    ...serverDeps(config, built, slackEnvironmentState, slackConfig?.botToken, feishuCard, feishuConfig ?? undefined),
     managedSlack,
     ...(env.PORTAL_SESSION_SECRET
       ? {
@@ -67,6 +92,21 @@ export async function startQm(
     `[qm] listening on :${config.port} (org=${config.orgId}, ` +
       `workers=${config.workers}, backgroundWork=${config.backgroundWorkEnabled})`,
   );
+
+  if (feishuConfig) {
+    try {
+      feishuSurface = await startFeishuSurface({
+        config: feishuConfig,
+        core: feishuCore!,
+        ...(feishuCardHandler ? { cardHandler: feishuCardHandler } : {}),
+        leaderLease: built.leaderLease,
+        directory: built.directory,
+      });
+      console.log(`[qm] feishu connected as ${feishuSurface.channel.botIdentity?.name ?? "bot"}`);
+    } catch (error) {
+      reportFailure("feishu start", error);
+    }
+  }
 
   if (config.deployAppsDomain) {
     const domain = config.deployAppsDomain;
@@ -160,6 +200,7 @@ export async function startQm(
       for (const runtime of slackAccountRuntimes)
         void runtime.stop().catch((e: unknown) => console.error("[qm] slack account stop failed:", errMessage(e)));
       void built.scheduler.stop().catch((e: unknown) => console.error("[qm] scheduler stop failed:", errMessage(e)));
+      void feishuSurface?.stop().catch((e: unknown) => console.error("[qm] feishu stop failed:", errMessage(e)));
       built.deploymentLayerRefresh.stop();
       await built.runtime.stop(async () => {
         await deadline;

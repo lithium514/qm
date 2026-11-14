@@ -3,6 +3,7 @@ import { reachEnqueue, withThread } from "../../reach/reach.ts";
 import { classifyUser, slackUserTimezone, type SlackIdentityMode, type SlackUser } from "../../slack/identity.ts";
 import { resolveMentions } from "../../slack/mrkdwn.ts";
 import type { Destination } from "../../types.ts";
+import { surfaceCapabilities } from "../capabilities.ts";
 import type { ExternalAudienceAccess, Surface, SurfaceUser, TurnSurfaceOrigin } from "../contract.ts";
 
 interface SlackNative {
@@ -61,14 +62,15 @@ export function createSlackSurface(deps: { deliveries: DeliveryStore }): Surface
       };
     },
   };
+  const caps = surfaceCapabilities("slack");
   return {
     kind: "slack",
     label: "Slack",
     capabilities: {
-      mirrored: true,
-      liveReplies: true,
-      nativeActor: true,
-      externalParticipants: true,
+      mirrored: caps.historyRevisions,
+      liveReplies: caps.replyEngagement,
+      nativeActor: caps.actingUserId,
+      externalParticipants: caps.externalAudience,
       textOnly: false,
     },
     promptHints: SLACK_PROMPT_HINTS,

@@ -5,7 +5,7 @@ import type { FeishuCore } from "./core.ts";
 import { feishuMessageText } from "./payloads.ts";
 import { reportFailureAs } from "../util/errors.ts";
 
-export interface FeishuHistoryRequest {
+interface FeishuHistoryRequest {
   chatId: string;
   threadId?: string;
   beforeTs: string;

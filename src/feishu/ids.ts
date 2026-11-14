@@ -1,5 +1,5 @@
 export const FEISHU_SURFACE = "feishu";
-export const FEISHU_REF_PREFIX = "fs";
+const FEISHU_REF_PREFIX = "fs";
 
 export interface FeishuRef {
   chatId: string;

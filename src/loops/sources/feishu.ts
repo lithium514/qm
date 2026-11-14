@@ -59,7 +59,7 @@ export function feishuConversationRef(
   return isDirectMessage && !threadId ? chatId : `${chatId}:${threadId ?? messageId}`;
 }
 
-export function feishuReplyMessageId(item: LoopItem): string | undefined {
+function feishuReplyMessageId(item: LoopItem): string | undefined {
   const feishu = metaOf(item);
   if (!feishu) return undefined;
   return feishu.threadId ?? (feishu.isDirectMessage ? undefined : feishu.messageId);

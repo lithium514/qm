@@ -10,14 +10,14 @@ const LOGGER_LEVELS: Record<string, LoggerLevel> = {
   trace: LoggerLevel.trace,
 };
 
-export const FEISHU_DEDUP_TTL_MS = 10 * 60_000;
-export const FEISHU_STALE_MESSAGE_WINDOW_MS = 10 * 60_000;
+const FEISHU_DEDUP_TTL_MS = 10 * 60_000;
+const FEISHU_STALE_MESSAGE_WINDOW_MS = 10 * 60_000;
 
-export function resolveFeishuDomain(domain: FeishuDomain | undefined): Domain {
+function resolveFeishuDomain(domain: FeishuDomain | undefined): Domain {
   return domain === "lark" ? Domain.Lark : Domain.Feishu;
 }
 
-export function resolveFeishuLoggerLevel(value: string | undefined): LoggerLevel {
+function resolveFeishuLoggerLevel(value: string | undefined): LoggerLevel {
   const level = value?.trim().toLowerCase();
   return level && level in LOGGER_LEVELS ? LOGGER_LEVELS[level]! : LoggerLevel.info;
 }

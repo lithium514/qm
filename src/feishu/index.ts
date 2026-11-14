@@ -19,44 +19,10 @@ import type { FeishuClient } from "./directory.ts";
 import { createFeishuCardHandler, createFeishuMessageHandler, type FeishuCardResponse } from "./handler.ts";
 import type { FeishuCardAction } from "./payloads.ts";
 
-export type { FeishuPluginConfig } from "./config.ts";
-export { feishuPluginConfigFromEnv, parseFeishuDomain } from "./config.ts";
-export { buildFeishuCard, type FeishuCardButton, type FeishuCardInput } from "./cards.ts";
-export {
-  FEISHU_REF_PREFIX,
-  FEISHU_SURFACE,
-  feishuContainerRef,
-  feishuConversationKind,
-  feishuThreadRef,
-  isFeishuRef,
-  parseFeishuRef,
-  type FeishuRef,
-} from "./ids.ts";
-export {
-  parseCardAction,
-  parseEventEnvelope,
-  parseMessageRecall,
-  parseQmAction,
-  parseReactionEvent,
-  qmActionValue,
-  type FeishuCardAction,
-  type FeishuEventEnvelope,
-  type FeishuQmAction,
-  type FeishuReaction,
-  type FeishuRecall,
-} from "./payloads.ts";
+export { feishuPluginConfigFromEnv } from "./config.ts";
 export { createFeishuCore, type FeishuCore } from "./core.ts";
-export { createFeishuDeliveryPoller, type FeishuDeliveryPoller } from "./delivery.ts";
-export {
-  createFeishuCardHandler,
-  createFeishuMessageHandler,
-  mimeTypeForName,
-  type FeishuCardResponse,
-  type FeishuMessageHandlerDeps,
-} from "./handler.ts";
-export { feishuDeliveryTarget, parseFeishuDeliveryTarget } from "./ids.ts";
 
-export interface FeishuHandlers {
+interface FeishuHandlers {
   onMessage(message: NormalizedMessage): void | Promise<void>;
   onCardAction(event: CardActionEvent): void | Promise<void>;
   onReaction(event: ReactionEvent): void | Promise<void>;
@@ -64,7 +30,7 @@ export interface FeishuHandlers {
   onError?(error: LarkChannelError): void;
 }
 
-export interface FeishuPlugin {
+interface FeishuPlugin {
   channel: LarkChannel;
   stop(): Promise<void>;
 }
@@ -79,7 +45,7 @@ function guard<T>(context: string, handler: (value: T) => void | Promise<void>):
   };
 }
 
-export async function startFeishuPlugin(
+async function startFeishuPlugin(
   config: FeishuPluginConfig,
   handlers: FeishuHandlers,
   channel: LarkChannel = createFeishuChannel(config),

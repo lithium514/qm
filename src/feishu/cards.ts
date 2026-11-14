@@ -17,8 +17,8 @@ export type FeishuCardTemplate =
   | "grey";
 
 export const FEISHU_CARD_BODY_MAX = 20_000;
-export const FEISHU_CARD_TITLE_MAX = 120;
-export const FEISHU_CARD_BUTTON_MAX = 4;
+const FEISHU_CARD_TITLE_MAX = 120;
+const FEISHU_CARD_BUTTON_MAX = 4;
 
 export interface FeishuCardButton {
   label: string;

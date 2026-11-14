@@ -2,18 +2,18 @@ import * as lark from "@larksuiteoapi/node-sdk";
 import { reportFailureAs } from "../util/errors.ts";
 import { feishuMessageText } from "./payloads.ts";
 
-export interface FeishuReaderChat {
+interface FeishuReaderChat {
   chatId: string;
   name?: string;
   isDirect: boolean;
 }
 
-export interface FeishuReaderMember {
+interface FeishuReaderMember {
   id: string;
   name?: string;
 }
 
-export interface FeishuReaderMessage {
+interface FeishuReaderMessage {
   messageId: string;
   chatId: string;
   senderId: string;
@@ -30,14 +30,14 @@ export interface FeishuUserReader {
   listMessages(chatId: string, since: number, until: number): Promise<FeishuReaderMessage[]>;
 }
 
-export interface FeishuConversation {
+interface FeishuConversation {
   chatId: string;
   chatLabel: string;
   isDirectMessage: boolean;
   messages: Array<FeishuReaderMessage & { senderName?: string }>;
 }
 
-export interface FeishuConversationsResult {
+interface FeishuConversationsResult {
   viewerOpenId?: string;
   conversations: FeishuConversation[];
   overflowChats?: number;
@@ -56,7 +56,7 @@ export function feishuUserReaderFactory(appId: string, appSecret: string): (toke
   return (token) => createFeishuUserReader(appId, appSecret, token);
 }
 
-export function createFeishuUserReader(appId: string, appSecret: string, token: string): FeishuUserReader {
+function createFeishuUserReader(appId: string, appSecret: string, token: string): FeishuUserReader {
   const client = new lark.Client({ appId, appSecret, appType: lark.AppType.SelfBuild });
   const options = lark.withUserAccessToken(token);
   return {

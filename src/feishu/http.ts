@@ -8,7 +8,7 @@ import { isObj } from "../util/objects.ts";
 import { parseCardAction, type FeishuCardAction } from "./payloads.ts";
 import type { FeishuCardResponse } from "./handler.ts";
 
-export const FEISHU_CARD_MAX_BODY_BYTES = 256 * 1024;
+const FEISHU_CARD_MAX_BODY_BYTES = 256 * 1024;
 export const FEISHU_CARD_TIMESTAMP_WINDOW_MS = 5 * 60_000;
 
 export interface FeishuCardEndpoint {
@@ -34,13 +34,13 @@ export function feishuSignature(input: { timestamp: string; nonce: string; encry
     .digest("hex");
 }
 
-export interface FeishuSignatureCheck {
+interface FeishuSignatureCheck {
   ok: boolean;
   reason?: string;
   scheme?: "sha256-encrypt-key" | "sha1-verification-token";
 }
 
-export function verifyFeishuSignatureDetailed(input: {
+function verifyFeishuSignatureDetailed(input: {
   timestamp: string | undefined;
   nonce: string | undefined;
   signature: string | undefined;

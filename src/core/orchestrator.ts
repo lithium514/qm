@@ -1004,16 +1004,20 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       const { sharingSources, memoryScopeId, baseRecallScopes, memoryAccess } = context;
       resolution.grantedHandles = context.listFiles();
       const isWeb = caps.id === "web";
-      const surfaceTool = caps.toolName;
+      const surfaceTool = caps.id === "feishu" ? caps.toolName : input.surface || "slack";
       const surfaceHints = surface?.promptHints;
       const automationDestination = input.origin.kind === "automation" ? input.origin.destination?.type : undefined;
       const surfaceName =
-        automationDestination === undefined ? caps.id : (deps.surfaces.get(automationDestination)?.kind ?? caps.id);
+        automationDestination === undefined
+          ? input.surface || "slack"
+          : (deps.surfaces.get(automationDestination)?.kind ?? "slack");
       const toolSurface = deps.surfaces.get(surfaceName || "slack");
       const branding = await resolveBranding(deps.config, resolution.orgScopeId, deps.brandingDefault);
       const botName = branding.selfLabel ?? "QM";
       const orgName = branding.orgName ?? "this organization";
-      const surfaceLabel = isWeb ? `the ${botName} web app` : caps.label;
+      let surfaceLabel = "Slack";
+      if (isWeb) surfaceLabel = `the ${botName} web app`;
+      else if (input.surface) surfaceLabel = toolSurface?.label ?? (caps.id === "feishu" ? caps.label : "Slack");
       const rawHandle = cleanBrandingLabel(input.gatewayContext?.botHandle?.replace(/^@/, ""), 40);
       const botHandle = rawHandle && rawHandle.toLowerCase() !== botName.toLowerCase() ? rawHandle : undefined;
       let modeName = "mode-fallback";
@@ -2043,15 +2047,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             );
             const payload = resolved?.body as
               { approved?: boolean; scope?: string; command?: string; approvalKey?: string } | undefined;
-            if (payload) {
-              if (!payload.approved) {
-                return {
-                  status: "refused",
-                  sessionId: session.id,
-                  reason: `approval denied for ${payload.command ?? "this command"}`,
-                  refusalKind: "approval_denied",
-                };
-              }
+            if (payload?.approved) {
               approvalAlreadyApplied = true;
               const uses = payload.scope === "once" ? 1 : Infinity;
               if (payload.approvalKey)

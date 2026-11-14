@@ -31,6 +31,7 @@ export function createApprovalStore(
       });
       return;
     }
+    if (request.surface !== "slack") return;
     const origin = request.surfaceOrigin;
     const threadTs = request.conversation?.kind === "dm" ? origin?.replyThread : undefined;
     await deliveries.enqueue({

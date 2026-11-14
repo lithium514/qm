@@ -65,6 +65,7 @@ const PARTNER_CHAT: SurfaceCapabilities = {
   toolName: "partner-chat",
   historyRevisions: true,
   actingUserId: true,
+  ambientJudge: true,
 };
 
 const WEB: SurfaceCapabilities = {

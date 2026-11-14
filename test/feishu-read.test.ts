@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { feishuMessageText, readFeishuConversations, type FeishuUserReader } from "../src/feishu/read.ts";
+import { readFeishuConversations, type FeishuUserReader } from "../src/feishu/read.ts";
+import { feishuMessageText } from "../src/feishu/payloads.ts";
 
 function reader(overrides: Partial<FeishuUserReader> = {}): FeishuUserReader {
   return {

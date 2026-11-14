@@ -411,7 +411,7 @@ function resolvedStatus(entry: LedgerItem): InboxItem["status"] {
 
 export function toInboxItem(entry: LedgerItem): InboxItem {
   const payload = entry.sourcePayload;
-  const sourceId = entry.source ?? payload.source;
+  const sourceId = entry.source;
   const source: InboxSource =
     sourceId === "gmail" || sourceId === "slack" || sourceId === "feishu" ? sourceId : "generic";
   const draft = draftOf(entry);

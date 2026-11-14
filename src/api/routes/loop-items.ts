@@ -620,6 +620,7 @@ function serializeItemAction(handler: (ctx: ApiCtx) => Promise<void>): (ctx: Api
 }
 
 const FEISHU_READ_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
+const FEISHU_READ_MAX_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 async function feishuConversations(ctx: ApiCtx): Promise<void> {
   const loaded = await loadAdministrable(ctx);
@@ -642,6 +643,12 @@ async function feishuConversations(ctx: ApiCtx): Promise<void> {
   const until = Date.now();
   const requested = Number(ctx.url.searchParams.get("since"));
   const since = Number.isFinite(requested) && requested > 0 ? requested : until - FEISHU_READ_WINDOW_MS;
+  if (since < until - FEISHU_READ_MAX_WINDOW_MS) {
+    return sendJson(ctx.res, 400, {
+      error: "bad_request",
+      message: `since is more than ${FEISHU_READ_MAX_WINDOW_MS / 86_400_000} days old`,
+    });
+  }
   try {
     const result = await readFeishuConversations(readerFactory(token), { since, until });
     sendJson(ctx.res, 200, { since, until, ...result });

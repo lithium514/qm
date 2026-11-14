@@ -1,7 +1,6 @@
 import * as lark from "@larksuiteoapi/node-sdk";
 import { reportFailureAs } from "../util/errors.ts";
 import { feishuMessageText } from "./payloads.ts";
-export { feishuMessageText } from "./payloads.ts";
 
 export interface FeishuReaderChat {
   chatId: string;
@@ -44,6 +43,7 @@ export interface FeishuConversationsResult {
 }
 
 const MAX_PAGES = 100;
+const MAX_CHATS = 200;
 
 class FeishuReadOverflow extends Error {}
 
@@ -78,18 +78,29 @@ export function createFeishuUserReader(appId: string, appSecret: string, token: 
       });
     },
     async listMembers(chatId) {
-      const res = await client.im.v1.chatMembers.get(
-        {
-          path: { chat_id: chatId },
-          params: { member_id_type: "open_id", page_size: 100 },
-        },
-        options,
-      );
-      return (res.data?.items ?? []).flatMap((member) => {
-        const id = member.member_id;
-        if (!id) return [];
-        return [{ id, ...(member.name ? { name: member.name } : {}) }];
-      });
+      const members: FeishuReaderMember[] = [];
+      let pageToken: string | undefined;
+      for (let page = 0; ; page++) {
+        if (page >= MAX_PAGES) throw new FeishuReadOverflow(`more than ${MAX_PAGES * 100} members in ${chatId}`);
+        const res = await client.im.v1.chatMembers.get(
+          {
+            path: { chat_id: chatId },
+            params: {
+              member_id_type: "open_id",
+              page_size: 100,
+              ...(pageToken ? { page_token: pageToken } : {}),
+            },
+          },
+          options,
+        );
+        for (const member of res.data?.items ?? []) {
+          const id = member.member_id;
+          if (id) members.push({ id, ...(member.name ? { name: member.name } : {}) });
+        }
+        if (!res.data?.has_more || !res.data.page_token) break;
+        pageToken = res.data.page_token;
+      }
+      return members;
     },
     async listMessages(chatId, since, until) {
       const out: FeishuReaderMessage[] = [];
@@ -138,17 +149,16 @@ export async function readFeishuConversations(
   opts: { since: number; until: number },
 ): Promise<FeishuConversationsResult> {
   const [viewerOpenId, chats] = await Promise.all([reader.viewerOpenId(), reader.listChats()]);
+  if (chats.length > MAX_CHATS) throw new FeishuReadOverflow(`more than ${MAX_CHATS} Feishu chats`);
   const conversations: FeishuConversation[] = [];
   for (const chat of chats) {
-    const [members, messages] = await Promise.all([
-      reader
-        .listMembers(chat.chatId)
-        .catch(reportFailureAs(`feishu: read members ${chat.chatId}`, [] as FeishuReaderMember[])),
-      reader.listMessages(chat.chatId, opts.since, opts.until),
-    ]);
-    const names = new Map(members.map((member) => [member.id, member.name] as const));
+    const messages = await reader.listMessages(chat.chatId, opts.since, opts.until);
     const human = messages.filter((message) => message.senderType !== "app");
     if (!human.length) continue;
+    const members = await reader
+      .listMembers(chat.chatId)
+      .catch(reportFailureAs(`feishu: read members ${chat.chatId}`, [] as FeishuReaderMember[]));
+    const names = new Map(members.map((member) => [member.id, member.name] as const));
     conversations.push({
       chatId: chat.chatId,
       chatLabel: chat.name ?? chat.chatId,

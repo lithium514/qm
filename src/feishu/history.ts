@@ -64,7 +64,7 @@ export function createFeishuHistoryReader(opts: {
     const read = opts.core.readSurfaceMessages;
     if (!read) return [];
     const base: ReadMessagesOpts = {
-      limit: (request.limit ?? 200) * 3,
+      limit: request.limit ?? 200,
       oldestFirst: true,
       orderBy: "createdAt",
       noFallback: true,
@@ -85,18 +85,27 @@ export function createFeishuHistoryReader(opts: {
     const client = opts.channel.rawClient;
     if (!client) return [];
     const botOpenId = typeof opts.botOpenId === "function" ? opts.botOpenId() : opts.botOpenId;
-    const response = await client.im.v1.message.list({
-      params: {
-        container_id_type: "chat",
-        container_id: request.chatId,
-        sort_type: "ByCreateTimeDesc",
-        page_size: Math.min(50, (request.limit ?? 200) * 3),
-        with_sender_name: true,
-      },
-    });
-    const mapped = (response.data?.items ?? [])
-      .map((item) => toCachedMessage(item, request.chatId, botOpenId))
-      .filter((message): message is CachedMessage => message !== undefined);
+    const limit = request.limit ?? 200;
+    const mapped: CachedMessage[] = [];
+    let pageToken: string | undefined;
+    for (let page = 0; page < 100 && mapped.length < limit; page++) {
+      const response = await client.im.v1.message.list({
+        params: {
+          container_id_type: "chat",
+          container_id: request.chatId,
+          sort_type: "ByCreateTimeDesc",
+          page_size: Math.min(50, limit - mapped.length),
+          with_sender_name: true,
+          ...(pageToken ? { page_token: pageToken } : {}),
+        },
+      });
+      for (const item of response.data?.items ?? []) {
+        const message = toCachedMessage(item, request.chatId, botOpenId);
+        if (message) mapped.push(message);
+      }
+      if (!response.data?.has_more || !response.data.page_token) break;
+      pageToken = response.data.page_token;
+    }
     const filtered = request.threadId
       ? mapped.filter((message) => message.ts === request.threadId || message.sub === request.threadId)
       : mapped;

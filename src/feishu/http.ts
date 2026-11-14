@@ -2,6 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { AESCipher, generateChallenge } from "@larksuiteoapi/node-sdk";
 import { PayloadTooLargeError, readBodyBytes } from "../../plugins/chassis/src/http.ts";
 import { sendJson } from "../api/http.ts";
+import { errMessage } from "../util/errors.ts";
 import type { BaseCtx, Route } from "../api/routes/route.ts";
 import { isObj } from "../util/objects.ts";
 import { parseCardAction, type FeishuCardAction } from "./payloads.ts";
@@ -36,7 +37,7 @@ export function feishuSignature(input: { timestamp: string; nonce: string; encry
 export interface FeishuSignatureCheck {
   ok: boolean;
   reason?: string;
-  scheme?: "sha256-encrypt-key" | "sha1-verification-token" | "sha256-verification-token" | "sha1-encrypt-key";
+  scheme?: "sha256-encrypt-key" | "sha1-verification-token";
 }
 
 export function verifyFeishuSignatureDetailed(input: {
@@ -57,29 +58,20 @@ export function verifyFeishuSignatureDetailed(input: {
     const timestampMs = timestampNumber > 1e12 ? timestampNumber : timestampNumber * 1000;
     if (Math.abs(now - timestampMs) > FEISHU_CARD_TIMESTAMP_WINDOW_MS) return { ok: false, reason: "stale timestamp" };
   }
-  const bodies =
-    input.rawBody !== undefined && input.rawBody !== input.body ? [input.body, input.rawBody] : [input.body];
+  const body = input.rawBody ?? input.body;
   const schemes: Array<{ secret: string; hash: "sha1" | "sha256"; scheme: FeishuSignatureCheck["scheme"] }> = [
     ...(input.encryptKey
-      ? [
-          { secret: input.encryptKey, hash: "sha256" as const, scheme: "sha256-encrypt-key" as const },
-          { secret: input.encryptKey, hash: "sha1" as const, scheme: "sha1-encrypt-key" as const },
-        ]
+      ? [{ secret: input.encryptKey, hash: "sha256" as const, scheme: "sha256-encrypt-key" as const }]
       : []),
     ...(input.verificationToken
-      ? [
-          { secret: input.verificationToken, hash: "sha1" as const, scheme: "sha1-verification-token" as const },
-          { secret: input.verificationToken, hash: "sha256" as const, scheme: "sha256-verification-token" as const },
-        ]
+      ? [{ secret: input.verificationToken, hash: "sha1" as const, scheme: "sha1-verification-token" as const }]
       : []),
   ];
-  for (const body of bodies) {
-    for (const { secret, hash, scheme } of schemes) {
-      const candidate = createHash(hash)
-        .update(input.timestamp + input.nonce + secret + body)
-        .digest("hex");
-      if (safeEqual(candidate, input.signature)) return { ok: true, scheme };
-    }
+  for (const { secret, hash, scheme } of schemes) {
+    const candidate = createHash(hash)
+      .update(input.timestamp + input.nonce + secret + body)
+      .digest("hex");
+    if (safeEqual(candidate, input.signature)) return { ok: true, scheme };
   }
   return { ok: false, reason: "signature mismatch" };
 }
@@ -119,6 +111,7 @@ async function handleFeishuCard(ctx: BaseCtx): Promise<void> {
   try {
     raw = await readBodyBytes(ctx.req, FEISHU_CARD_MAX_BODY_BYTES);
   } catch (error) {
+    console.error(`[feishu] card callback body failed: ${errMessage(error)}`);
     if (error instanceof PayloadTooLargeError) sendJson(ctx.res, 413, { error: "payload_too_large" });
     else sendJson(ctx.res, 400, { error: "bad_request" });
     return;
@@ -129,7 +122,8 @@ async function handleFeishuCard(ctx: BaseCtx): Promise<void> {
   try {
     outer = JSON.parse(bodyText);
     body = decodeBody(outer, endpoint.encryptKey);
-  } catch {
+  } catch (error) {
+    console.error(`[feishu] card callback decode failed: ${errMessage(error)}`);
     sendJson(ctx.res, 400, { error: "bad_request" });
     return;
   }
@@ -139,8 +133,8 @@ async function handleFeishuCard(ctx: BaseCtx): Promise<void> {
       encryptKey: endpoint.encryptKey ?? "",
       ...(endpoint.verificationToken ? { verificationToken: endpoint.verificationToken } : {}),
     });
-  } catch {
-    console.error("[feishu] card callback challenge rejected");
+  } catch (error) {
+    console.error(`[feishu] card callback challenge rejected: ${errMessage(error)}`);
     sendJson(ctx.res, 401, { error: "invalid_token" });
     return;
   }

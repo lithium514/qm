@@ -151,7 +151,7 @@ test("feishu card route verifies the signature and dispatches the action", async
     timestamp,
     nonce,
     encryptKey: "encrypt-key",
-    body: JSON.stringify(body),
+    body: text,
   });
   const { ctx, status, json } = context(text, {
     endpoint,
@@ -255,7 +255,7 @@ test("feishu card route decrypts an encrypted callback and dispatches it", async
     timestamp,
     nonce,
     encryptKey,
-    body: JSON.stringify(outer),
+    body: text,
   });
   const { ctx, status, json } = context(text, {
     endpoint,

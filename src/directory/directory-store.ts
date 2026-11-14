@@ -44,8 +44,8 @@ export type ChannelResolution =
 
 export interface DirectoryStore {
   replace(members: DirectoryMember[], syncedAt?: number): Promise<boolean>;
-  upsertMembers?(members: DirectoryMember[]): Promise<void>;
-  upsertChannels?(channels: DirectoryChannel[], channelMembers: ChannelMembership[]): Promise<void>;
+  upsertMembers(members: DirectoryMember[]): Promise<void>;
+  upsertChannels(channels: DirectoryChannel[], channelMembers: ChannelMembership[]): Promise<void>;
   replaceChannels(
     channels: DirectoryChannel[],
     channelMembers?: ChannelMembership[],

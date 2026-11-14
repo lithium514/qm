@@ -22,9 +22,8 @@ export function createFeishuDirectorySync(opts: {
   leaderLease?: LeaderLease;
 }): FeishuDirectorySync {
   const run = async (): Promise<void> => {
-    const upsertMembers = opts.directory.upsertMembers?.bind(opts.directory);
-    const upsertChannels = opts.directory.upsertChannels?.bind(opts.directory);
-    if (!upsertMembers || !upsertChannels) return;
+    const upsertMembers = opts.directory.upsertMembers.bind(opts.directory);
+    const upsertChannels = opts.directory.upsertChannels.bind(opts.directory);
     const botOpenId = typeof opts.botOpenId === "function" ? opts.botOpenId() : opts.botOpenId;
     const chats = await listChats(opts.client);
     const ownTenantKey = chats.find((chat) => !chat.external && chat.tenantKey)?.tenantKey;

@@ -5,7 +5,7 @@ import { errMessage, reportFailure } from "../util/errors.ts";
 import type { Delivery } from "../types.ts";
 import { approvalCard, deployAccessCard, keychainCard } from "./approval.ts";
 import type { FeishuCore } from "./core.ts";
-import { parseFeishuDeliveryTarget, type FeishuRef } from "./ids.ts";
+import { feishuSendOptions, parseFeishuDeliveryTarget, type FeishuRef } from "./ids.ts";
 
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const DEFAULT_CLAIM_MS = 30_000;
@@ -22,10 +22,6 @@ export interface FeishuDeliveryPoller {
   drain(): Promise<number>;
 }
 
-function sendOptions(target: FeishuRef): { replyTo: string; replyInThread: boolean } | undefined {
-  return target.threadId ? { replyTo: target.threadId, replyInThread: true } : undefined;
-}
-
 async function deliverAttachments(
   channel: Pick<LarkChannel, "send">,
   core: FeishuCore,
@@ -34,7 +30,7 @@ async function deliverAttachments(
 ): Promise<void> {
   for (const attachment of delivery.attachments ?? []) {
     const bytes = await core.readBlob(attachment.blobId);
-    const options = sendOptions(target);
+    const options = feishuSendOptions(target);
     if (attachment.mimetype.startsWith("image/")) {
       await channel.send(target.chatId, { image: { source: bytes } }, options);
     } else {
@@ -54,14 +50,14 @@ async function deliverOne(channel: Pick<LarkChannel, "send">, core: FeishuCore, 
     if (delivery.destination.commandApprovalId) {
       const approval = await core.getApproval(delivery.destination.commandApprovalId);
       if (approval) {
-        await channel.send(target.chatId, { card: approvalCard(approval) }, sendOptions(target));
+        await channel.send(target.chatId, { card: approvalCard(approval) }, feishuSendOptions(target));
       }
       await core.ackDelivery(delivery.id, Date.now() - started);
       return;
     }
     if (delivery.destination.keychainAskId) {
       const view = await core.keychainApprovals?.card(delivery.destination.keychainAskId);
-      if (view) await channel.send(target.chatId, { card: keychainCard(view) }, sendOptions(target));
+      if (view) await channel.send(target.chatId, { card: keychainCard(view) }, feishuSendOptions(target));
       await core.ackDelivery(delivery.id, Date.now() - started);
       return;
     }
@@ -69,13 +65,13 @@ async function deliverOne(channel: Pick<LarkChannel, "send">, core: FeishuCore, 
       await channel.send(
         target.chatId,
         { card: deployAccessCard(delivery.destination.deploymentAccess, delivery.text) },
-        sendOptions(target),
+        feishuSendOptions(target),
       );
       await core.ackDelivery(delivery.id, Date.now() - started);
       return;
     }
     if (delivery.text.trim() || !delivery.attachments?.length) {
-      await channel.send(target.chatId, { markdown: delivery.text }, sendOptions(target));
+      await channel.send(target.chatId, { markdown: delivery.text }, feishuSendOptions(target));
     }
     await deliverAttachments(channel, core, target, delivery);
     await core.ackDelivery(delivery.id, Date.now() - started);

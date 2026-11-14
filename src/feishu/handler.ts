@@ -11,6 +11,7 @@ import {
   feishuContainerRef,
   feishuConversationKind,
   feishuDeliveryTarget,
+  feishuSendOptions,
   feishuThreadRef,
   type FeishuRef,
 } from "./ids.ts";
@@ -40,10 +41,6 @@ function senderIsBot(message: NormalizedMessage, botOpenId: string | undefined):
   if (botOpenId && message.senderId === botOpenId) return true;
   const raw = message.raw as { sender?: { sender_type?: string } } | undefined;
   return raw?.sender?.sender_type === "app";
-}
-
-function sendOptions(target: FeishuRef): { replyTo: string; replyInThread: boolean } | undefined {
-  return target.threadId ? { replyTo: target.threadId, replyInThread: true } : undefined;
 }
 
 export interface FeishuMessageHandlerDeps {
@@ -173,7 +170,7 @@ export function createFeishuMessageHandler(
         displayName: actor.displayName ?? actor.externalId,
         type: "internal",
       })
-      .catch(() => undefined);
+      .catch((error) => reportFailure("feishu: member upsert", error, `chat=${message.chatId}`));
     let history: FeishuHistory | undefined;
     if (deps.readHistory) {
       try {
@@ -214,7 +211,7 @@ export function createFeishuMessageHandler(
       await deps.core.turn(request);
     } catch (error) {
       await deps.channel
-        .send(target.chatId, { markdown: GENERIC_FAILURE_TEXT }, sendOptions(target))
+        .send(target.chatId, { markdown: GENERIC_FAILURE_TEXT }, feishuSendOptions(target))
         .catch(() => undefined);
       throw error;
     }

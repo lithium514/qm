@@ -193,8 +193,9 @@ export const feishuAdapter: LoopSourceAdapter = {
   matchesEvent(item, conversationRef) {
     const feishu = metaOf(item);
     if (!feishu) return false;
-    return (feishu.isDirectMessage ? [true, false] : [false]).some(
-      (dm) => feishuConversationRef(feishu.chatId, feishu.messageId, feishu.threadId, dm) === conversationRef,
+    return (
+      feishuConversationRef(feishu.chatId, feishu.messageId, feishu.threadId, feishu.isDirectMessage === true) ===
+      conversationRef
     );
   },
   parseProposal(raw) {

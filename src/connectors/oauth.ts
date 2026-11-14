@@ -55,7 +55,6 @@ export interface OAuthProviderConfig {
   egressRule: string[];
   setupGuide: OAuthSetupGuide;
   scopeParam?: string;
-  scopeSeparator?: string;
   authParams?: Record<string, string>;
   exchange?: OAuthExchangeAdapter;
   refresh?: OAuthRefreshAdapter | null;
@@ -762,7 +761,7 @@ export function authorizeUrl(
     q.set("code_challenge", opts.codeChallenge);
     q.set("code_challenge_method", "S256");
   }
-  q.set(p.scopeParam ?? "scope", scopes.join(p.scopeSeparator ?? " "));
+  q.set(p.scopeParam ?? "scope", scopes.join(" "));
   for (const [k, v] of Object.entries(p.authParams ?? {})) q.set(k, v);
   if (accountType === "company" && opts.client.hostedDomain) q.set("hd", opts.client.hostedDomain);
   return `${p.authUrl}?${q.toString()}`;

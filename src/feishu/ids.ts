@@ -6,6 +6,10 @@ export interface FeishuRef {
   threadId?: string;
 }
 
+export function feishuSendOptions(target: FeishuRef): { replyTo: string; replyInThread: boolean } | undefined {
+  return target.threadId ? { replyTo: target.threadId, replyInThread: true } : undefined;
+}
+
 function validPart(value: string | undefined): value is string {
   return typeof value === "string" && value.length > 0 && !value.includes(":");
 }
